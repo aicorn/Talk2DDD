@@ -5,7 +5,7 @@
 | 技术 | 版本 | 选择理由 |
 |------|------|---------|
 | Python | 3.11+ | 生态成熟，AI/ML 支持最佳 |
-| FastAPI | 0.104+ | 高性能，原生异步，自动文档 |
+| FastAPI | 0.109+ | 高性能, 原生异步, 自动文档 |
 | SQLAlchemy | 2.0+ | 成熟 ORM，支持异步 |
 | Alembic | 1.12+ | SQLAlchemy 配套迁移工具 |
 | PostgreSQL | 16 | 生产级关系数据库 |
@@ -18,7 +18,7 @@
 
 | 技术 | 版本 | 选择理由 |
 |------|------|---------|
-| Next.js | 14 | React 全栈框架，SSR/SSG 支持 |
+| Next.js | 15.2+ | React 全栈框架，SSR/SSG 支持 |
 | TypeScript | 5+ | 类型安全，提高代码质量 |
 | Tailwind CSS | 3.3+ | 实用优先 CSS 框架 |
 | React Query | 5 | 服务端状态管理 |
