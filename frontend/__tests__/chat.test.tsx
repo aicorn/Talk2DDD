@@ -18,10 +18,11 @@ describe('ChatPage', () => {
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Talk2DDD AI 助手')
   })
 
-  it('renders provider radio buttons for openai and deepseek', () => {
+  it('renders provider radio buttons for openai, deepseek, and minimax', () => {
     render(<ChatPage />)
     expect(screen.getByRole('radio', { name: 'openai' })).toBeInTheDocument()
     expect(screen.getByRole('radio', { name: 'deepseek' })).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: 'minimax' })).toBeInTheDocument()
   })
 
   it('defaults to openai provider', () => {

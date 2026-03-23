@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 
-type Provider = 'openai' | 'deepseek'
+type Provider = 'openai' | 'deepseek' | 'minimax'
 
 interface Message {
   role: 'user' | 'assistant'
@@ -64,7 +64,7 @@ export default function ChatPage() {
       {/* Provider selector */}
       <div className="flex items-center gap-4 mb-4">
         <span className="text-sm font-medium text-gray-700">AI 提供商：</span>
-        {(['openai', 'deepseek'] as Provider[]).map((p) => (
+        {(['openai', 'deepseek', 'minimax'] as Provider[]).map((p) => (
           <label key={p} className="flex items-center gap-1 cursor-pointer">
             <input
               type="radio"

@@ -1,4 +1,4 @@
-"""AI service abstraction supporting multiple providers (OpenAI, DeepSeek)."""
+"""AI service abstraction supporting multiple providers (OpenAI, DeepSeek, MiniMax)."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from app.config import settings
 class AIProvider(str, Enum):
     OPENAI = "openai"
     DEEPSEEK = "deepseek"
+    MINIMAX = "minimax"
 
 
 def get_ai_client(provider: str) -> tuple[AsyncOpenAI, str]:
@@ -36,6 +37,12 @@ def get_ai_client(provider: str) -> tuple[AsyncOpenAI, str]:
             base_url=settings.DEEPSEEK_BASE_URL,
         )
         model = settings.DEEPSEEK_MODEL
+    elif prov == AIProvider.MINIMAX:
+        client = AsyncOpenAI(
+            api_key=settings.MINIMAX_API_KEY,
+            base_url=settings.MINIMAX_BASE_URL,
+        )
+        model = settings.MINIMAX_MODEL
     else:
         client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
         model = settings.OPENAI_MODEL
