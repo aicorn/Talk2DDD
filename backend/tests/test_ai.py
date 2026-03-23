@@ -76,6 +76,28 @@ async def test_chat_with_deepseek_provider(client):
 
 
 @pytest.mark.asyncio
+async def test_chat_with_minimax_provider(client):
+    with patch(
+        "app.routers.v1.ai.chat_completion",
+        new_callable=AsyncMock,
+        return_value="minimax reply",
+    ) as mock_chat:
+        response = await client.post(
+            "/api/v1/ai/chat",
+            json={
+                "messages": [{"role": "user", "content": "Hi"}],
+                "provider": "minimax",
+            },
+        )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["provider"] == "minimax"
+    mock_chat.assert_called_once()
+    _, kwargs = mock_chat.call_args
+    assert kwargs.get("provider") == "minimax"
+
+
+@pytest.mark.asyncio
 async def test_chat_empty_messages_returns_422(client):
     response = await client.post(
         "/api/v1/ai/chat",

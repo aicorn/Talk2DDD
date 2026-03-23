@@ -9,7 +9,7 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: List[ChatMessage] = Field(..., min_length=1)
-    provider: Optional[Literal["openai", "deepseek"]] = None
+    provider: Optional[Literal["openai", "deepseek", "minimax"]] = None
 
 
 class ChatResponse(BaseModel):

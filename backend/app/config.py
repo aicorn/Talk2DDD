@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
-    # AI Provider selection: "openai" or "deepseek"
+    # AI Provider selection: "openai", "deepseek", or "minimax"
     AI_PROVIDER: str = "openai"
 
     # OpenAI
@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     DEEPSEEK_API_KEY: str = ""
     DEEPSEEK_MODEL: str = "deepseek-chat"
     DEEPSEEK_BASE_URL: str = "https://api.deepseek.com/v1"
+
+    # MiniMax
+    MINIMAX_API_KEY: str = ""
+    MINIMAX_MODEL: str = "MiniMax-M1"
+    MINIMAX_BASE_URL: str = "https://api.minimaxi.chat/v1"
 
     # CORS
     ALLOWED_ORIGINS: List[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
