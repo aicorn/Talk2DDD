@@ -11,8 +11,14 @@ if ! command -v docker &> /dev/null; then
     exit 1
 fi
 
-if ! command -v docker-compose &> /dev/null; then
-    echo "❌ Docker Compose 未安装"
+# 检测 docker compose 命令（优先使用新版插件形式）
+if docker compose version &>/dev/null; then
+    COMPOSE_CMD=(docker compose)
+elif command -v docker-compose &>/dev/null; then
+    COMPOSE_CMD=(docker-compose)
+else
+    echo "❌ Docker Compose 未安装，请安装 Docker Compose 插件或独立版本"
+    echo "   参考: https://docs.docker.com/compose/install/"
     exit 1
 fi
 
@@ -35,7 +41,7 @@ fi
 
 # Start services
 echo "🐳 启动 Docker 服务..."
-docker-compose up -d
+"${COMPOSE_CMD[@]}" up -d
 
 # Wait for services
 echo "⏳ 等待服务启动..."
@@ -43,12 +49,12 @@ sleep 10
 
 # Initialize database
 echo "🗄️  初始化数据库..."
-docker-compose exec -T backend alembic upgrade head
+"${COMPOSE_CMD[@]}" exec -T backend alembic upgrade head
 
 # Verify
 echo ""
 echo "✅ 验证服务状态..."
-docker-compose ps
+"${COMPOSE_CMD[@]}" ps
 
 echo ""
 echo "🎉 启动完成！"
