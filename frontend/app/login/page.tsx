@@ -24,6 +24,7 @@ export default function LoginPage() {
       const res = await fetch(`${API_URL}/api/v1/users/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ email, password }),
       })
 
@@ -33,7 +34,7 @@ export default function LoginPage() {
       }
 
       const data = await res.json()
-      document.cookie = `access_token=${data.access_token}; path=/; max-age=${data.expires_in}`
+      document.cookie = `access_token=${data.access_token}; path=/; max-age=${data.expires_in}; SameSite=Lax`
       router.push(redirect)
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : '登录失败，请重试')
