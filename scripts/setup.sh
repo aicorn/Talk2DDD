@@ -41,7 +41,7 @@ fi
 
 # Start services
 echo "🐳 启动 Docker 服务..."
-"${COMPOSE_CMD[@]}" up -d
+"${COMPOSE_CMD[@]}" up -d --build
 
 # Wait for services
 echo "⏳ 等待服务启动..."

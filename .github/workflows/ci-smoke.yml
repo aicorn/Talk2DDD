@@ -53,25 +53,14 @@ jobs:
         working-directory: backend
         run: pip install -r requirements.txt
 
-      - name: Create database tables
+      - name: Run database migrations
         working-directory: backend
         env:
           DATABASE_URL: postgresql+asyncpg://talk2ddd:password@localhost:5432/talk2ddd
           SECRET_KEY: test-secret-key-for-ci-smoke-minimum-32ch
           AI_PROVIDER: openai
           OPENAI_API_KEY: sk-test
-        run: |
-          python -c "
-          import asyncio
-          from app.database.session import engine
-          from app.database.base import Base
-          import app.models  # noqa: F401 - registers all ORM models with Base
-          async def create_tables():
-              async with engine.begin() as conn:
-                  await conn.run_sync(Base.metadata.create_all)
-          asyncio.run(create_tables())
-          print('Database tables created')
-          "
+        run: alembic upgrade head
 
       - name: Start backend server
         working-directory: backend
