@@ -67,3 +67,51 @@ jobs:
       - name: Run tests with coverage
         working-directory: frontend
         run: npm run test:coverage -- --watchAll=false
+
+  test-install-script:
+    name: Test Install Script
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y shellcheck
+
+      - name: Lint install script with shellcheck
+        run: shellcheck -S warning scripts/install.sh
+
+      - name: Verify script is executable after chmod
+        run: |
+          chmod +x scripts/install.sh
+          test -x scripts/install.sh
+
+      - name: Syntax check (bash -n)
+        run: bash -n scripts/install.sh
+
+      - name: Dry-run smoke test (helper functions only, no Docker)
+        env:
+          TALK2DDD_DIR: /tmp/talk2ddd-ci-test
+        run: |
+          # Source the script (main() is guarded, so it won't run automatically).
+          # Then stub out side-effect functions and call main() to validate logic.
+          bash -c '
+            set -euo pipefail
+            # shellcheck disable=SC1091
+            source scripts/install.sh
+
+            # Stub out functions that require network / root / Docker / disk writes.
+            install_docker()   { echo "[stub] install_docker skipped"; }
+            setup_repo()       { echo "[stub] setup_repo skipped"; }
+            setup_env()        { echo "[stub] setup_env skipped"; }
+            start_services()   { echo "[stub] start_services skipped"; }
+            wait_for_backend() { echo "[stub] wait_for_backend skipped"; }
+            run_migrations()   { echo "[stub] run_migrations skipped"; }
+            print_summary()    { echo "[stub] print_summary skipped"; }
+
+            main "$@"
+          '
+          echo "Smoke test passed"
