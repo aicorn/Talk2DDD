@@ -9,7 +9,7 @@ on:
 jobs:
   backend-test:
     name: Backend Tests
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
 
     steps:
       - name: Checkout code
@@ -39,7 +39,7 @@ jobs:
 
   frontend-test:
     name: Frontend Tests
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
 
     steps:
       - name: Checkout code
