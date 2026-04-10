@@ -71,7 +71,7 @@ start_infra() {
     fi
 
     # 解析 docker compose 命令
-    if docker compose version &>/dev/null 2>&1; then
+    if docker compose version &>/dev/null; then
         COMPOSE_CMD=(docker compose)
     elif check_command docker-compose; then
         COMPOSE_CMD=(docker-compose)
@@ -140,6 +140,10 @@ setup_python_conda() {
     conda activate "${CONDA_ENV_NAME}"
     success "已激活 conda 环境: ${CONDA_ENV_NAME}"
 
+    install_python_deps
+}
+
+install_python_deps() {
     info "安装 Python 依赖..."
     pip install -r backend/requirements.txt -q
     success "Python 依赖安装完成"
@@ -150,7 +154,7 @@ setup_python_no_venv() {
     for cmd in python3.11 python3 python; do
         if check_command "$cmd"; then
             local ver
-            ver=$("$cmd" -c "import sys; print(sys.version_info.major*10+sys.version_info.minor)" 2>/dev/null || echo 0)
+            ver=$("$cmd" -c "import sys; print(sys.version_info.major*100+sys.version_info.minor)" 2>/dev/null || echo 0)
             [[ "$ver" -ge 311 ]] && py="$cmd" && break
         fi
     done
@@ -158,9 +162,7 @@ setup_python_no_venv() {
     PYTHON_CMD="$py"
     success "使用 Python: $($py --version)"
 
-    info "安装 Python 依赖..."
-    "$py" -m pip install -r backend/requirements.txt -q
-    success "Python 依赖安装完成"
+    install_python_deps
 }
 
 # ── 数据库迁移 ────────────────────────────────────────────────────────────────
@@ -244,16 +246,24 @@ print_summary() {
     echo ""
 }
 
+# ── conda 安装检测 ────────────────────────────────────────────────────────────
+has_conda() {
+    check_command conda && return 0
+    for dir in "$HOME/miniconda3" "$HOME/anaconda3" /opt/miniconda3 /opt/anaconda3; do
+        [[ -x "$dir/bin/conda" ]] && return 0
+    done
+    return 1
+}
+
 # ── 主流程 ────────────────────────────────────────────────────────────────────
 main() {
     check_node
     mkdir -p logs
     start_infra
     setup_env
-    if $USE_VENV && (check_command conda || \
-        ls "$HOME/miniconda3" "$HOME/anaconda3" /opt/miniconda3 /opt/anaconda3 2>/dev/null | grep -q .); then
+    if $USE_VENV && has_conda; then
         setup_python_conda
-    elif $USE_VENV && ! check_command conda; then
+    elif $USE_VENV; then
         warn "未检测到 conda，回退到系统 Python（如需 conda 环境请先安装 Miniconda）"
         setup_python_no_venv
     else
