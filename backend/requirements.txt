@@ -9,7 +9,10 @@ asyncpg==0.29.0
 psycopg2-binary==2.9.9
 
 # Authentication & Security
+# python-jose 3.3.0 is incompatible with cryptography>=42 (removed internal APIs),
+# so pin cryptography to a compatible range until python-jose is replaced.
 python-jose[cryptography]==3.3.0
+cryptography>=3.4.0,<42.0.0
 passlib[bcrypt]==1.7.4
 bcrypt==3.2.2
 python-multipart==0.0.22
