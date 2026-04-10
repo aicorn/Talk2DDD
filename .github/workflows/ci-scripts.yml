@@ -15,7 +15,7 @@ on:
 jobs:
   test-install-script:
     name: Test Install Script
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       contents: read
 
