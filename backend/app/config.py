@@ -1,4 +1,5 @@
 from typing import List
+import json
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
@@ -46,6 +47,19 @@ class Settings(BaseSettings):
     @classmethod
     def parse_allowed_origins(cls, v):
         if isinstance(v, str):
+            v = v.strip()
+            if v.startswith("["):
+                try:
+                    parsed = json.loads(v)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"ALLOWED_ORIGINS must be a JSON array or comma-separated string, got: {v!r}"
+                    ) from exc
+                if not isinstance(parsed, list) or not all(isinstance(i, str) for i in parsed):
+                    raise ValueError(
+                        f"ALLOWED_ORIGINS must be a JSON array of strings, got: {type(parsed).__name__} {parsed!r}"
+                    )
+                return parsed
             return [origin.strip() for origin in v.split(",") if origin.strip()]
         return v
 
