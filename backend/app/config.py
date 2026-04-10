@@ -1,5 +1,5 @@
 from typing import List
-from pydantic import field_validator
+import json
 from pydantic_settings import BaseSettings
 
 
@@ -36,18 +36,28 @@ class Settings(BaseSettings):
     MINIMAX_MODEL: str = "MiniMax-M1"
     MINIMAX_BASE_URL: str = "https://api.minimaxi.chat/v1"
 
-    # CORS
-    ALLOWED_ORIGINS: List[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    # CORS — stored as str to prevent pydantic-settings from trying to JSON-parse
+    # the value before our own validator runs (it raises SettingsError for
+    # comma-separated strings when the field type is List[str]).
+    # Use the `cors_origins` property to get the parsed list.
+    ALLOWED_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
 
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
 
-    @field_validator("ALLOWED_ORIGINS", mode="before")
-    @classmethod
-    def parse_allowed_origins(cls, v):
-        if isinstance(v, str):
-            return [origin.strip() for origin in v.split(",") if origin.strip()]
-        return v
+    @property
+    def cors_origins(self) -> List[str]:
+        """Return ALLOWED_ORIGINS as a list, accepting both comma-separated strings
+        and JSON arrays so that any .env file format works."""
+        v = self.ALLOWED_ORIGINS.strip()
+        if v.startswith("["):
+            try:
+                parsed = json.loads(v)
+                return [str(i) for i in parsed]
+            except json.JSONDecodeError:
+                # Fall back to comma-separated parsing if JSON is malformed
+                pass
+        return [o.strip() for o in v.split(",") if o.strip()]
 
     class Config:
         env_file = ".env"

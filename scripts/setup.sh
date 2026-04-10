@@ -41,7 +41,17 @@ fi
 
 # Start services
 echo "🐳 启动 Docker 服务..."
-"${COMPOSE_CMD[@]}" up -d
+if ! "${COMPOSE_CMD[@]}" up -d --build; then
+    echo ""
+    echo "❌ 启动失败！正在显示 backend 日志以帮助诊断..."
+    echo "========================================================"
+    "${COMPOSE_CMD[@]}" logs --tail=200 backend || true
+    echo "========================================================"
+    echo ""
+    echo "💡 如果问题持续，可尝试强制完全重新构建:"
+    echo "   ${COMPOSE_CMD[*]} build --no-cache && ${COMPOSE_CMD[*]} up -d"
+    exit 1
+fi
 
 # Wait for services
 echo "⏳ 等待服务启动..."
