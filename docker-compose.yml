@@ -68,11 +68,10 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - BACKEND_URL=http://backend:8000
       - NODE_ENV=${NODE_ENV:-production}
-      - PORT=${FRONTEND_PORT:-3000}
     ports:
-      - "${FRONTEND_PORT:-3000}:${FRONTEND_PORT:-3000}"
+      - "${FRONTEND_PORT:-3000}:3000"
     depends_on:
       backend:
         condition: service_healthy

@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     # the value before our own validator runs (it raises SettingsError for
     # comma-separated strings when the field type is List[str]).
     # Use the `cors_origins` property to get the parsed list.
-    ALLOWED_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
+    ALLOWED_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000,http://localhost:8080,http://127.0.0.1:8080"
 
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
