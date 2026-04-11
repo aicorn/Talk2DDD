@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { getAuthHeaders } from '@/lib/auth'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? ''
 
@@ -22,10 +23,10 @@ export default function DashboardPage() {
     async function fetchUser() {
       try {
         const res = await fetch(`${API_URL}/api/v1/users/me`, {
-          credentials: 'include',
+          headers: getAuthHeaders(),
         })
         if (!res.ok) {
-          if (res.status === 401) {
+          if (res.status === 401 || res.status === 403) {
             router.push('/login')
             return
           }
