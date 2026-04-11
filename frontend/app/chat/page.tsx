@@ -2,6 +2,8 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 
 type Provider = 'openai' | 'deepseek' | 'minimax'
 
@@ -135,8 +137,8 @@ export default function ChatPage() {
               return (
                 <div className="max-w-[75%]">
                   {thinking && <ThinkBlock thinking={thinking} />}
-                  <div className="rounded-lg px-4 py-2 text-sm bg-white border text-gray-800">
-                    {reply}
+                  <div className="rounded-lg px-4 py-2 text-sm bg-white border text-gray-800 prose prose-sm max-w-none">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{reply}</ReactMarkdown>
                   </div>
                 </div>
               )
