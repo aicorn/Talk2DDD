@@ -1,6 +1,13 @@
 from typing import List
 import json
+from pathlib import Path
 from pydantic_settings import BaseSettings
+
+# Resolve .env paths relative to this file so the app finds the right .env
+# regardless of which directory uvicorn is started from.
+# Priority (highest last): project root .env → backend/.env
+_BACKEND_DIR = Path(__file__).resolve().parent.parent   # backend/
+_PROJECT_ROOT = _BACKEND_DIR.parent                      # project root
 
 
 class Settings(BaseSettings):
@@ -62,7 +69,10 @@ class Settings(BaseSettings):
         return [o.strip() for o in v.split(",") if o.strip()]
 
     class Config:
-        env_file = ".env"
+        # Search the project root first, then backend/ (backend/.env takes precedence).
+        # Using absolute paths means the app finds the right .env file regardless of
+        # which directory uvicorn is started from.
+        env_file = (str(_PROJECT_ROOT / ".env"), str(_BACKEND_DIR / ".env"))
         case_sensitive = True
 
 
