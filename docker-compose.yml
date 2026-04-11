@@ -66,9 +66,12 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        # BACKEND_URL must be a build arg (not just environment) because Next.js
+        # rewrites() are evaluated at build time and baked into routes-manifest.json.
+        BACKEND_URL: http://backend:8000
     restart: unless-stopped
     environment:
-      - BACKEND_URL=http://backend:8000
       - NODE_ENV=${NODE_ENV:-production}
     ports:
       - "${FRONTEND_PORT:-3000}:3000"
