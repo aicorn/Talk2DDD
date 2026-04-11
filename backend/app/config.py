@@ -1,6 +1,13 @@
 from typing import List
 import json
+from pathlib import Path
 from pydantic_settings import BaseSettings
+
+# Resolve .env paths relative to this file so the app finds the right .env
+# regardless of which directory uvicorn is started from.
+# Priority (highest last): project root .env → backend/.env
+_BACKEND_DIR = Path(__file__).resolve().parent.parent   # backend/
+_PROJECT_ROOT = _BACKEND_DIR.parent                      # project root
 
 
 class Settings(BaseSettings):
@@ -32,9 +39,11 @@ class Settings(BaseSettings):
     DEEPSEEK_BASE_URL: str = "https://api.deepseek.com/v1"
 
     # MiniMax
+    # Domestic China endpoint: https://api.minimax.chat/v1
+    # International endpoint:  https://api.minimaxi.chat/v1
     MINIMAX_API_KEY: str = ""
-    MINIMAX_MODEL: str = "MiniMax-M1"
-    MINIMAX_BASE_URL: str = "https://api.minimaxi.chat/v1"
+    MINIMAX_MODEL: str = "MiniMax-Text-01"
+    MINIMAX_BASE_URL: str = "https://api.minimax.chat/v1"
 
     # CORS — stored as str to prevent pydantic-settings from trying to JSON-parse
     # the value before our own validator runs (it raises SettingsError for
@@ -60,7 +69,10 @@ class Settings(BaseSettings):
         return [o.strip() for o in v.split(",") if o.strip()]
 
     class Config:
-        env_file = ".env"
+        # Search the project root first, then backend/ (backend/.env takes precedence).
+        # Using absolute paths means the app finds the right .env file regardless of
+        # which directory uvicorn is started from.
+        env_file = (str(_PROJECT_ROOT / ".env"), str(_BACKEND_DIR / ".env"))
         case_sensitive = True
 
 

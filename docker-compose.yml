@@ -40,7 +40,15 @@ services:
     environment:
       - DATABASE_URL=postgresql+asyncpg://talk2ddd:${DB_PASSWORD:-password}@db:5432/talk2ddd
       - SECRET_KEY=${SECRET_KEY:-change-this-secret-key-in-production}
+      - AI_PROVIDER=${AI_PROVIDER:-openai}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-deepseek-chat}
+      - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
+      - MINIMAX_API_KEY=${MINIMAX_API_KEY:-}
+      - MINIMAX_MODEL=${MINIMAX_MODEL:-MiniMax-Text-01}
+      - MINIMAX_BASE_URL=${MINIMAX_BASE_URL:-https://api.minimax.chat/v1}
       - ALLOWED_ORIGINS=http://localhost:${FRONTEND_PORT:-3000},http://frontend:${FRONTEND_PORT:-3000},http://localhost:8080
       - DEBUG=${DEBUG:-false}
       - ENVIRONMENT=${ENVIRONMENT:-production}
