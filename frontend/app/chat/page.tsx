@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import { useRouter } from 'next/navigation'
 
 type Provider = 'openai' | 'deepseek' | 'minimax'
 
@@ -12,11 +13,13 @@ interface Message {
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? ''
 
 export default function ChatPage() {
+  const router = useRouter()
   const [provider, setProvider] = useState<Provider>('openai')
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   async function sendMessage() {
     const trimmed = input.trim()
@@ -59,24 +62,44 @@ export default function ChatPage() {
 
   return (
     <main className="flex flex-col h-screen max-w-3xl mx-auto p-4">
-      <h1 className="text-2xl font-bold text-blue-600 mb-4">🤖 Talk2DDD AI 助手</h1>
+      {/* Header: title + back button */}
+      <div className="flex items-center justify-between mb-4">
+        <h1 className="text-2xl font-bold text-blue-600">🤖 Talk2DDD AI 助手</h1>
+        <button
+          onClick={() => router.push('/dashboard')}
+          className="flex items-center gap-1 px-3 py-1.5 text-sm text-gray-600 border rounded-lg hover:bg-gray-100"
+        >
+          ← 返回 Dashboard
+        </button>
+      </div>
 
-      {/* Provider selector */}
-      <div className="flex items-center gap-4 mb-4">
-        <span className="text-sm font-medium text-gray-700">AI 提供商：</span>
-        {(['openai', 'deepseek', 'minimax'] as Provider[]).map((p) => (
-          <label key={p} className="flex items-center gap-1 cursor-pointer">
-            <input
-              type="radio"
-              name="provider"
-              value={p}
-              checked={provider === p}
-              onChange={() => setProvider(p)}
-              aria-label={p}
-            />
-            <span className="capitalize text-sm">{p}</span>
-          </label>
-        ))}
+      {/* Collapsible provider selector */}
+      <div className="mb-4 border rounded-lg overflow-hidden">
+        <button
+          onClick={() => setSettingsOpen((o) => !o)}
+          className="w-full flex items-center justify-between px-4 py-2 text-sm font-medium text-gray-700 bg-gray-50 hover:bg-gray-100"
+        >
+          <span>AI 设置</span>
+          <span>{settingsOpen ? '▲' : '▼'}</span>
+        </button>
+        {settingsOpen && (
+          <div className="flex items-center gap-4 px-4 py-3 bg-white">
+            <span className="text-sm font-medium text-gray-700">AI 提供商：</span>
+            {(['openai', 'deepseek', 'minimax'] as Provider[]).map((p) => (
+              <label key={p} className="flex items-center gap-1 cursor-pointer">
+                <input
+                  type="radio"
+                  name="provider"
+                  value={p}
+                  checked={provider === p}
+                  onChange={() => setProvider(p)}
+                  aria-label={p}
+                />
+                <span className="capitalize text-sm">{p}</span>
+              </label>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Chat history */}
