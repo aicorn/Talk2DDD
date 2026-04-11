@@ -71,15 +71,28 @@ describe('DashboardPage', () => {
     })
   })
 
-  it('shows error message when API call fails', async () => {
+  it('redirects to /login when API returns 401', async () => {
     ;(global.fetch as jest.Mock).mockResolvedValueOnce({
       ok: false,
       status: 401,
-      json: async () => ({ detail: '无法获取用户信息' }),
+      json: async () => ({ detail: 'Not authenticated' }),
     })
     render(<DashboardPage />)
     await waitFor(() => {
-      expect(screen.getByRole('alert')).toHaveTextContent('无法获取用户信息')
+      expect(mockPush).toHaveBeenCalledWith('/login')
+    })
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('shows error message when non-401 API call fails', async () => {
+    ;(global.fetch as jest.Mock).mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      json: async () => ({ detail: '服务器错误' }),
+    })
+    render(<DashboardPage />)
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent('服务器错误')
     })
   })
 
