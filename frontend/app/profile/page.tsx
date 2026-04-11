@@ -8,6 +8,9 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? ''
 
 const DEFAULT_LANGUAGE = 'zh'
 const DEFAULT_THEME = 'light'
+const DEFAULT_PROVIDER = 'openai'
+
+type Provider = 'openai' | 'deepseek' | 'minimax'
 
 interface UserInfo {
   id: string
@@ -32,6 +35,12 @@ export default function ProfilePage() {
   const [bio, setBio] = useState('')
   const [preferredLanguage, setPreferredLanguage] = useState<string | null>(null)
   const [theme, setTheme] = useState<string | null>(null)
+  const [aiProvider, setAiProvider] = useState<Provider>(() => {
+    if (typeof window === 'undefined') return DEFAULT_PROVIDER as Provider
+    const stored = window.localStorage.getItem('ai_provider')
+    if (stored === 'openai' || stored === 'deepseek' || stored === 'minimax') return stored
+    return DEFAULT_PROVIDER as Provider
+  })
 
   useEffect(() => {
     async function fetchUser() {
@@ -91,6 +100,7 @@ export default function ProfilePage() {
       }
       const data: UserInfo = await res.json()
       setUser(data)
+      window.localStorage.setItem('ai_provider', aiProvider)
       setSuccessMsg('个人信息已更新')
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : '保存失败，请重试')
@@ -234,6 +244,25 @@ export default function ProfilePage() {
                     <option value="light">浅色</option>
                     <option value="dark">深色</option>
                   </select>
+                </div>
+
+                <div>
+                  <span className="block text-sm font-medium text-gray-700 mb-2">AI 提供商</span>
+                  <div className="flex items-center gap-6">
+                    {(['openai', 'deepseek', 'minimax'] as Provider[]).map((p) => (
+                      <label key={p} className="flex items-center gap-1.5 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="ai_provider"
+                          value={p}
+                          checked={aiProvider === p}
+                          onChange={() => setAiProvider(p)}
+                          aria-label={p}
+                        />
+                        <span className="capitalize text-sm text-gray-700">{p}</span>
+                      </label>
+                    ))}
+                  </div>
                 </div>
 
                 {error && (
