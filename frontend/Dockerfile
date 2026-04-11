@@ -14,6 +14,12 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
+# BACKEND_URL is a build-time arg: Next.js rewrites() are compiled into
+# .next/routes-manifest.json during `npm run build`, not re-evaluated at
+# container startup.  Pass the correct value via docker-compose build.args.
+ARG BACKEND_URL=http://localhost:8000
+ENV BACKEND_URL=${BACKEND_URL}
+
 ENV NEXT_TELEMETRY_DISABLED 1
 
 RUN npm run build

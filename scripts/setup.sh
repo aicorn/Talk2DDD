@@ -39,9 +39,12 @@ if [ ! -f "frontend/.env" ]; then
     cp frontend/.env.example frontend/.env.local
 fi
 
-# Start services
-echo "🐳 启动 Docker 服务..."
-if ! "${COMPOSE_CMD[@]}" up -d --build; then
+# Start services and wait until all healthchecks pass.
+# --wait blocks until every service with a healthcheck reports healthy,
+# so by the time this returns the backend has already run its migrations
+# (start.sh runs alembic upgrade head before starting uvicorn).
+echo "🐳 启动 Docker 服务（等待所有服务健康检查通过）..."
+if ! "${COMPOSE_CMD[@]}" up -d --build --wait; then
     echo ""
     echo "❌ 启动失败！正在显示 backend 日志以帮助诊断..."
     echo "========================================================"
@@ -49,22 +52,20 @@ if ! "${COMPOSE_CMD[@]}" up -d --build; then
     echo "========================================================"
     echo ""
     echo "💡 如果问题持续，可尝试强制完全重新构建:"
-    echo "   ${COMPOSE_CMD[*]} build --no-cache && ${COMPOSE_CMD[*]} up -d"
+    echo "   ${COMPOSE_CMD[*]} build --no-cache && ${COMPOSE_CMD[*]} up -d --wait"
     exit 1
 fi
-
-# Wait for services
-echo "⏳ 等待服务启动..."
-sleep 10
-
-# Initialize database
-echo "🗄️  初始化数据库..."
-"${COMPOSE_CMD[@]}" exec -T backend alembic upgrade head
 
 # Verify
 echo ""
 echo "✅ 验证服务状态..."
 "${COMPOSE_CMD[@]}" ps
+
+echo ""
+echo "📋 最近的后端日志："
+echo "========================================================"
+"${COMPOSE_CMD[@]}" logs --tail=30 backend || true
+echo "========================================================"
 
 echo ""
 echo "🎉 启动完成！"
