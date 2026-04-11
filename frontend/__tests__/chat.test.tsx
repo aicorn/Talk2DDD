@@ -5,6 +5,11 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import ChatPage from '../app/chat/page'
 
+const mockPush = jest.fn()
+jest.mock('next/navigation', () => ({
+  useRouter: () => ({ push: mockPush }),
+}))
+
 // Silence fetch-not-defined warnings in jsdom
 global.fetch = jest.fn()
 
@@ -16,26 +21,6 @@ describe('ChatPage', () => {
   it('renders the heading', () => {
     render(<ChatPage />)
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Talk2DDD AI 助手')
-  })
-
-  it('renders provider radio buttons for openai, deepseek, and minimax', () => {
-    render(<ChatPage />)
-    expect(screen.getByRole('radio', { name: 'openai' })).toBeInTheDocument()
-    expect(screen.getByRole('radio', { name: 'deepseek' })).toBeInTheDocument()
-    expect(screen.getByRole('radio', { name: 'minimax' })).toBeInTheDocument()
-  })
-
-  it('defaults to openai provider', () => {
-    render(<ChatPage />)
-    const openaiRadio = screen.getByRole('radio', { name: 'openai' }) as HTMLInputElement
-    expect(openaiRadio.checked).toBe(true)
-  })
-
-  it('switches provider when deepseek radio is clicked', () => {
-    render(<ChatPage />)
-    const deepseekRadio = screen.getByRole('radio', { name: 'deepseek' }) as HTMLInputElement
-    fireEvent.click(deepseekRadio)
-    expect(deepseekRadio.checked).toBe(true)
   })
 
   it('renders the message input textarea', () => {
@@ -93,14 +78,14 @@ describe('ChatPage', () => {
     })
   })
 
-  it('calls fetch with the correct provider when deepseek is selected', async () => {
+  it('calls fetch with the provider from localStorage', async () => {
+    window.localStorage.setItem('ai_provider', 'deepseek')
     ;(global.fetch as jest.Mock).mockResolvedValueOnce({
       ok: true,
       json: async () => ({ reply: 'deepseek reply', provider: 'deepseek', model: 'deepseek-chat' }),
     })
 
     render(<ChatPage />)
-    fireEvent.click(screen.getByRole('radio', { name: 'deepseek' }))
     const input = screen.getByRole('textbox', { name: 'message input' })
     fireEvent.change(input, { target: { value: 'Hello' } })
     fireEvent.click(screen.getByRole('button', { name: 'send message' }))
@@ -110,5 +95,8 @@ describe('ChatPage', () => {
       const body = JSON.parse(fetchCall[1].body)
       expect(body.provider).toBe('deepseek')
     })
+
+    window.localStorage.removeItem('ai_provider')
   })
 })
+
