@@ -25,12 +25,13 @@ export default function DashboardPage() {
           credentials: 'include',
         })
         if (!res.ok) {
-          throw new Error(`HTTP ${res.status}`)
+          const body = await res.json().catch(() => ({}))
+          throw new Error(body.detail ?? `HTTP ${res.status}`)
         }
         const data = await res.json()
         setUser(data)
-      } catch {
-        setError('无法获取用户信息')
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : '无法获取用户信息')
       } finally {
         setLoading(false)
       }

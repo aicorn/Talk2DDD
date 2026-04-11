@@ -74,7 +74,8 @@ describe('DashboardPage', () => {
   it('shows error message when API call fails', async () => {
     ;(global.fetch as jest.Mock).mockResolvedValueOnce({
       ok: false,
-      json: async () => ({}),
+      status: 401,
+      json: async () => ({ detail: '无法获取用户信息' }),
     })
     render(<DashboardPage />)
     await waitFor(() => {
