@@ -25,6 +25,10 @@ export default function DashboardPage() {
           credentials: 'include',
         })
         if (!res.ok) {
+          if (res.status === 401) {
+            router.push('/login')
+            return
+          }
           const body = await res.json().catch(() => ({}))
           throw new Error(body.detail ?? `HTTP ${res.status}`)
         }
