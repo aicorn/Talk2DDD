@@ -11,6 +11,10 @@ jest.mock('next/navigation', () => ({
   useRouter: () => ({ push: mockPush }),
 }))
 
+jest.mock('../lib/auth', () => ({
+  getAuthHeaders: jest.fn(() => ({ Authorization: 'Bearer test-token' })),
+}))
+
 global.fetch = jest.fn()
 
 beforeEach(() => {
@@ -71,10 +75,37 @@ describe('DashboardPage', () => {
     })
   })
 
+  it('sends Authorization header with Bearer token from cookie', async () => {
+    ;(global.fetch as jest.Mock).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ id: '1', email: 'test@example.com', username: 'testuser', is_active: true }),
+    })
+    render(<DashboardPage />)
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/v1/users/me'),
+        expect.objectContaining({ headers: { Authorization: 'Bearer test-token' } }),
+      )
+    })
+  })
+
   it('redirects to /login when API returns 401', async () => {
     ;(global.fetch as jest.Mock).mockResolvedValueOnce({
       ok: false,
       status: 401,
+      json: async () => ({ detail: 'Not authenticated' }),
+    })
+    render(<DashboardPage />)
+    await waitFor(() => {
+      expect(mockPush).toHaveBeenCalledWith('/login')
+    })
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('redirects to /login when API returns 403', async () => {
+    ;(global.fetch as jest.Mock).mockResolvedValueOnce({
+      ok: false,
+      status: 403,
       json: async () => ({ detail: 'Not authenticated' }),
     })
     render(<DashboardPage />)
