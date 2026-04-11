@@ -11,12 +11,44 @@ interface Message {
 }
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? ''
+const THINK_PREVIEW_LEN = 60
 
 function getStoredProvider(): Provider {
   if (typeof window === 'undefined') return 'openai'
   const stored = window.localStorage.getItem('ai_provider')
   if (stored === 'openai' || stored === 'deepseek' || stored === 'minimax') return stored
   return 'openai'
+}
+
+/** Split assistant content into optional <think> block + main reply */
+function parseContent(content: string): { thinking: string | null; reply: string } {
+  const match = content.match(/^<think>([\s\S]*?)<\/think>([\s\S]*)$/i)
+  if (match) {
+    return { thinking: match[1].trim(), reply: match[2].trim() }
+  }
+  return { thinking: null, reply: content }
+}
+
+function ThinkBlock({ thinking }: { thinking: string }) {
+  const [open, setOpen] = useState(false)
+  const preview = thinking.length > THINK_PREVIEW_LEN
+    ? thinking.slice(0, THINK_PREVIEW_LEN) + '…'
+    : thinking
+  return (
+    <div className="mb-2 rounded border border-gray-200 bg-gray-50 text-xs text-gray-400">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center justify-between px-3 py-1.5 text-left hover:bg-gray-100 rounded"
+        aria-expanded={open}
+      >
+        <span className="truncate flex-1 mr-2">{open ? '思考过程' : preview}</span>
+        <span className="shrink-0">{open ? '▲' : '▼'}</span>
+      </button>
+      {open && (
+        <div className="px-3 pb-2 whitespace-pre-wrap leading-relaxed">{thinking}</div>
+      )}
+    </div>
+  )
 }
 
 export default function ChatPage() {
@@ -94,15 +126,21 @@ export default function ChatPage() {
             key={i}
             className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
           >
-            <div
-              className={`max-w-[75%] rounded-lg px-4 py-2 text-sm ${
-                msg.role === 'user'
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-white border text-gray-800'
-              }`}
-            >
-              {msg.content}
-            </div>
+            {msg.role === 'user' ? (
+              <div className="max-w-[75%] rounded-lg px-4 py-2 text-sm bg-blue-600 text-white">
+                {msg.content}
+              </div>
+            ) : (() => {
+              const { thinking, reply } = parseContent(msg.content)
+              return (
+                <div className="max-w-[75%]">
+                  {thinking && <ThinkBlock thinking={thinking} />}
+                  <div className="rounded-lg px-4 py-2 text-sm bg-white border text-gray-800">
+                    {reply}
+                  </div>
+                </div>
+              )
+            })()}
           </div>
         ))}
         {loading && (
