@@ -32,9 +32,11 @@ class Settings(BaseSettings):
     DEEPSEEK_BASE_URL: str = "https://api.deepseek.com/v1"
 
     # MiniMax
+    # Domestic China endpoint: https://api.minimax.chat/v1
+    # International endpoint:  https://api.minimaxi.chat/v1
     MINIMAX_API_KEY: str = ""
-    MINIMAX_MODEL: str = "MiniMax-M1"
-    MINIMAX_BASE_URL: str = "https://api.minimaxi.chat/v1"
+    MINIMAX_MODEL: str = "MiniMax-Text-01"
+    MINIMAX_BASE_URL: str = "https://api.minimax.chat/v1"
 
     # CORS — stored as str to prevent pydantic-settings from trying to JSON-parse
     # the value before our own validator runs (it raises SettingsError for

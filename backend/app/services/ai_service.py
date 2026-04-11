@@ -16,6 +16,30 @@ class AIProvider(str, Enum):
     MINIMAX = "minimax"
 
 
+def get_model_name(provider: str) -> str:
+    """Return the model name for *provider* without creating an API client.
+
+    This is a lightweight lookup used by the router to populate the response
+    schema.  Full validation (e.g. checking that the API key is set) is
+    deferred to :func:`get_ai_client`, which is called inside
+    :func:`chat_completion` when the actual network request is made.
+
+    Raises:
+        ValueError: If *provider* is not a recognised value.
+    """
+    try:
+        prov = AIProvider(provider)
+    except ValueError:
+        supported = ", ".join(p.value for p in AIProvider)
+        raise ValueError(f"Unsupported AI provider '{provider}'. Supported: {supported}")
+
+    if prov == AIProvider.DEEPSEEK:
+        return settings.DEEPSEEK_MODEL
+    if prov == AIProvider.MINIMAX:
+        return settings.MINIMAX_MODEL
+    return settings.OPENAI_MODEL
+
+
 def get_ai_client(provider: str) -> tuple[AsyncOpenAI, str]:
     """Return an AsyncOpenAI client and the model name for the given provider.
 
@@ -32,18 +56,33 @@ def get_ai_client(provider: str) -> tuple[AsyncOpenAI, str]:
         raise ValueError(f"Unsupported AI provider '{provider}'. Supported: {supported}")
 
     if prov == AIProvider.DEEPSEEK:
+        if not settings.DEEPSEEK_API_KEY:
+            raise ValueError(
+                "DEEPSEEK_API_KEY is not configured. "
+                "Please set it in your .env file."
+            )
         client = AsyncOpenAI(
             api_key=settings.DEEPSEEK_API_KEY,
             base_url=settings.DEEPSEEK_BASE_URL,
         )
         model = settings.DEEPSEEK_MODEL
     elif prov == AIProvider.MINIMAX:
+        if not settings.MINIMAX_API_KEY:
+            raise ValueError(
+                "MINIMAX_API_KEY is not configured. "
+                "Please set it in your .env file."
+            )
         client = AsyncOpenAI(
             api_key=settings.MINIMAX_API_KEY,
             base_url=settings.MINIMAX_BASE_URL,
         )
         model = settings.MINIMAX_MODEL
     else:
+        if not settings.OPENAI_API_KEY:
+            raise ValueError(
+                "OPENAI_API_KEY is not configured. "
+                "Please set it in your .env file."
+            )
         client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
         model = settings.OPENAI_MODEL
 

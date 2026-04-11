@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, status
 import openai
 
 from app.schemas.ai import ChatRequest, ChatResponse
-from app.services.ai_service import chat_completion, get_ai_client
+from app.services.ai_service import chat_completion, get_model_name
 from app.config import settings
 
 router = APIRouter()
@@ -12,7 +12,7 @@ router = APIRouter()
 async def ai_chat(request: ChatRequest):
     """Send messages to the selected AI provider and return the reply."""
     provider = request.provider or settings.AI_PROVIDER
-    _, model = get_ai_client(provider)
+    model = get_model_name(provider)
 
     try:
         reply = await chat_completion(
