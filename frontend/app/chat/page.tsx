@@ -305,10 +305,13 @@ export default function ChatPage() {
       }
       const data = await res.json()
       const label = DOC_TYPE_LABELS[documentType] ?? documentType
+      const savedMsg = data.project_id
+        ? `✅ **${label}**已生成完毕，并已保存到「我的项目」！请查看右侧文档面板。`
+        : `✅ **${label}**已生成完毕！请查看右侧文档面板。`
       // Add a system message into the chat to confirm generation
       setMessages((prev) => [
         ...prev,
-        { role: 'assistant', content: `✅ **${label}**已生成完毕！请查看右侧文档面板。` },
+        { role: 'assistant', content: savedMsg },
       ])
       // Display the generated document in the side panel
       setPhaseDocument({

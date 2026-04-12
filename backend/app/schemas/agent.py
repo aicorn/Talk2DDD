@@ -67,6 +67,7 @@ class GenerateDocumentResponse(BaseModel):
     document_type: str
     content: str
     version_id: str
+    project_id: Optional[str] = None
     generated_at: datetime
 
 

@@ -179,7 +179,7 @@ async def generate_document(
     )
 
     try:
-        content, version_id = await _agent_core.generate_document(
+        content, version_id, project_id = await _agent_core.generate_document(
             session_id=request.session_id,
             document_type=request.document_type,
             db=db,
@@ -189,19 +189,20 @@ async def generate_document(
     except (openai.OpenAIError, ValueError, RuntimeError) as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Document generation error: {exc}",
+            detail=f"文档生成失败：{exc}",
         ) from exc
     except Exception as exc:
         logger.exception("Unhandled error in generate_document: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="服务器内部错误，请稍后重试",
+            detail=f"服务器内部错误：{type(exc).__name__}: {exc}",
         ) from exc
 
     return GenerateDocumentResponse(
         document_type=request.document_type,
         content=content,
         version_id=version_id,
+        project_id=project_id,
         generated_at=datetime.now(timezone.utc),
     )
 

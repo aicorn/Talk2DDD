@@ -170,7 +170,7 @@ async def test_generate_document_returns_200(auth_client):
         patch(
             "app.routers.v1.agent._agent_core.generate_document",
             new_callable=AsyncMock,
-            return_value=("# 领域模型\n\n...", version_id),
+            return_value=("# 领域模型\n\n...", version_id, None),
         ),
     ):
         response = await client.post(

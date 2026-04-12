@@ -218,10 +218,13 @@ class AgentCore:
         db: AsyncSession,
         project_id: Optional[str] = None,
         provider: Optional[str] = None,
-    ) -> tuple[str, str]:
-        """Generate a DDD document and return (content, version_id).
+    ) -> tuple[str, str, Optional[str]]:
+        """Generate a DDD document and return (content, version_id, project_id).
 
-        Also updates the AgentContext to record the generated document.
+        Also updates the AgentContext to record the generated document and
+        persists the content as a DocumentVersion record linked to a Project.
+        A Project is auto-created from the conversation's domain knowledge if
+        one doesn't already exist.
         """
         ctx = await self._context_manager.load(session_id, db, project_id)
 
@@ -240,8 +243,107 @@ class AgentCore:
         ctx.add_document_ref(doc_type.value, version_id)
         ctx.turn_count += 1
 
+        # Persist to DB: ensure a Project exists and save DocumentVersion
+        resolved_project_id = await self._save_document_version(
+            session_id=session_id,
+            ctx=ctx,
+            doc_type=doc_type,
+            content=content,
+            version_id=version_id,
+            db=db,
+        )
+
         await self._context_manager.save(ctx, db)
-        return content, version_id
+        return content, version_id, resolved_project_id
+
+    async def _save_document_version(
+        self,
+        session_id: str,
+        ctx: AgentContext,
+        doc_type: DocumentType,
+        content: str,
+        version_id: str,
+        db: AsyncSession,
+    ) -> Optional[str]:
+        """Ensure a Project exists for this session and persist the DocumentVersion.
+
+        Returns the project_id (str) that was used, or None on error.
+        """
+        from sqlalchemy import select, func
+        from app.models.conversation import Conversation
+        from app.models.document import Project, DocumentVersion
+
+        try:
+            conv_uuid = _uuid.UUID(session_id)
+            result = await db.execute(
+                select(Conversation).where(Conversation.id == conv_uuid)
+            )
+            conv = result.scalar_one_or_none()
+            if conv is None:
+                return None
+
+            # Auto-create a project from domain knowledge if none linked yet
+            if conv.project_id is None:
+                project_name = (
+                    ctx.domain_knowledge.project_name
+                    or ctx.domain_knowledge.domain_description
+                    or "未命名项目"
+                )
+                if len(project_name) > 100:
+                    project_name = project_name[:100]
+                project = Project(
+                    name=project_name,
+                    description=ctx.domain_knowledge.domain_description or "",
+                    domain_name=ctx.domain_knowledge.project_name or "",
+                    owner_id=conv.user_id,
+                    status="active",
+                )
+                db.add(project)
+                await db.flush()
+                conv.project_id = project.id
+                project_id_uuid = project.id
+            else:
+                project_id_uuid = conv.project_id
+
+            # Determine next version number for this doc type in the project
+            count_result = await db.execute(
+                select(func.count()).select_from(DocumentVersion).where(
+                    DocumentVersion.project_id == project_id_uuid,
+                    DocumentVersion.document_type == doc_type.value,
+                )
+            )
+            existing_count = count_result.scalar() or 0
+
+            # Mark previous versions of the same type as not current
+            prev_result = await db.execute(
+                select(DocumentVersion).where(
+                    DocumentVersion.project_id == project_id_uuid,
+                    DocumentVersion.document_type == doc_type.value,
+                    DocumentVersion.is_current == True,  # noqa: E712
+                )
+            )
+            for old_ver in prev_result.scalars().all():
+                old_ver.is_current = False
+
+            doc_ver = DocumentVersion(
+                id=_uuid.UUID(version_id),
+                project_id=project_id_uuid,
+                version_number=existing_count + 1,
+                content=content,
+                document_type=doc_type.value,
+                is_current=True,
+                staleness_status="CURRENT",
+            )
+            db.add(doc_ver)
+            await db.flush()
+            return str(project_id_uuid)
+        except Exception:
+            # Non-fatal: log but don't fail document generation
+            import logging
+            logging.getLogger(__name__).exception(
+                "Failed to persist DocumentVersion for session %s", session_id
+            )
+            return None
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -271,8 +373,18 @@ class AgentCore:
         ctx.add_document_ref(doc_type.value, version_id)
         ctx.turn_count += 1
 
+        # Persist to DB
+        await self._save_document_version(
+            session_id=session_id,
+            ctx=ctx,
+            doc_type=doc_type,
+            content=content,
+            version_id=version_id,
+            db=db,
+        )
+
         ai_reply = (
-            f"✅ **{doc_label}**已生成完毕！请查看右侧文档面板。\n\n"
+            f"✅ **{doc_label}**已生成完毕，并已保存到「我的项目」！请查看右侧文档面板。\n\n"
             "您可以继续生成其他类型文档，或输入 `/next` 进入审阅完善阶段。"
         )
 
