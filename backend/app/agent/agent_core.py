@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import uuid as _uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -235,8 +236,6 @@ class AgentCore:
         content = await self._doc_pipeline.generate(ctx, doc_type, provider=provider)
 
         # Record the generated document in context
-        import uuid as _uuid
-
         version_id = str(_uuid.uuid4())
         ctx.add_document_ref(doc_type.value, version_id)
         ctx.turn_count += 1
@@ -268,7 +267,6 @@ class AgentCore:
         content = await self._doc_pipeline.generate(ctx, doc_type, provider=provider)
 
         # Record the document in context (same as generate_document())
-        import uuid as _uuid
         version_id = str(_uuid.uuid4())
         ctx.add_document_ref(doc_type.value, version_id)
         ctx.turn_count += 1

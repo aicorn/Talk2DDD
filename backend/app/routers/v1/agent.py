@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Annotated
 
 import openai
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger(__name__)
 
 from app.agent.agent_core import AgentCore
 from app.agent.context import PHASE_LABELS, PHASE_PROGRESS, Phase
@@ -119,9 +122,10 @@ async def agent_chat(
         # Catch-all: any unhandled exception (DB errors, unexpected failures)
         # must return a proper HTTP error instead of letting Uvicorn close the
         # connection (which would produce ECONNRESET on the proxy side).
+        logger.exception("Unhandled error in agent_chat: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Internal server error: {exc}",
+            detail="服务器内部错误，请稍后重试",
         ) from exc
 
     phase_doc = None
@@ -188,9 +192,10 @@ async def generate_document(
             detail=f"Document generation error: {exc}",
         ) from exc
     except Exception as exc:
+        logger.exception("Unhandled error in generate_document: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Internal server error: {exc}",
+            detail="服务器内部错误，请稍后重试",
         ) from exc
 
     return GenerateDocumentResponse(
