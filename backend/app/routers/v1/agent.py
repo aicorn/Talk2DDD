@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 import openai
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.agent_core import AgentCore
@@ -21,6 +21,8 @@ from app.schemas.agent import (
     AgentChatRequest,
     AgentChatResponse,
     AgentContextResponse,
+    ConversationListResponse,
+    ConversationSummary,
     ExtractedConcept,
     GenerateDocumentRequest,
     GenerateDocumentResponse,
@@ -293,3 +295,88 @@ async def get_phase_document(
         rendered_at=datetime.now(timezone.utc),
         turn_count=ctx.turn_count,
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /sessions
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/sessions",
+    response_model=ConversationListResponse,
+    status_code=200,
+)
+async def list_sessions(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ConversationListResponse:
+    """Return all Agent conversations belonging to the current user."""
+    from sqlalchemy import select
+
+    result = await db.execute(
+        select(Conversation)
+        .where(Conversation.user_id == current_user.id)
+        .order_by(Conversation.updated_at.desc())
+    )
+    convs = result.scalars().all()
+
+    items: list[ConversationSummary] = []
+    for conv in convs:
+        phase_val = conv.agent_phase or Phase.ICEBREAK.value
+        turn_count = 0
+        if conv.extra_data and "agent_context" in conv.extra_data:
+            turn_count = conv.extra_data["agent_context"].get("turn_count", 0)
+        items.append(
+            ConversationSummary(
+                session_id=str(conv.id),
+                title=conv.title,
+                phase=phase_val,
+                phase_label=PHASE_LABELS.get(phase_val, phase_val),
+                turn_count=turn_count,
+                created_at=conv.created_at,
+                updated_at=conv.updated_at,
+            )
+        )
+
+    return ConversationListResponse(conversations=items)
+
+
+# ---------------------------------------------------------------------------
+# DELETE /sessions/{session_id}
+# ---------------------------------------------------------------------------
+
+
+@router.delete("/sessions/{session_id}", status_code=204, response_class=Response)
+async def delete_session(
+    session_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> Response:
+    """Permanently delete an Agent conversation and all its messages."""
+    from sqlalchemy import select
+
+    try:
+        conv_uuid = _uuid.UUID(session_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid session_id: not a valid UUID",
+        )
+
+    result = await db.execute(
+        select(Conversation).where(
+            Conversation.id == conv_uuid,
+            Conversation.user_id == current_user.id,
+        )
+    )
+    conv = result.scalar_one_or_none()
+    if conv is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found",
+        )
+
+    await db.delete(conv)
+    await db.commit()
+    return Response(status_code=204)

@@ -13,11 +13,23 @@ interface UserInfo {
   is_active: boolean
 }
 
+interface ConversationSummary {
+  session_id: string
+  title: string | null
+  phase: string
+  phase_label: string
+  turn_count: number
+  updated_at: string
+}
+
 export default function DashboardPage() {
   const router = useRouter()
   const [user, setUser] = useState<UserInfo | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [sessions, setSessions] = useState<ConversationSummary[]>([])
+  const [sessionsLoading, setSessionsLoading] = useState(false)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
 
   useEffect(() => {
     async function fetchUser() {
@@ -43,6 +55,43 @@ export default function DashboardPage() {
     }
     fetchUser()
   }, [])
+
+  // Fetch session list once the user is confirmed authenticated
+  useEffect(() => {
+    if (!user) return
+    async function fetchSessions() {
+      setSessionsLoading(true)
+      try {
+        const res = await fetch(`${API_URL}/api/v1/agent/sessions`, {
+          headers: getAuthHeaders(),
+        })
+        if (res.ok) {
+          const data = await res.json()
+          setSessions(data.conversations ?? [])
+        }
+      } catch {
+        // Non-critical: silently ignore session list errors
+      } finally {
+        setSessionsLoading(false)
+      }
+    }
+    fetchSessions()
+  }, [user])
+
+  async function handleDeleteSession(sessionId: string) {
+    setDeletingId(sessionId)
+    try {
+      await fetch(`${API_URL}/api/v1/agent/sessions/${sessionId}`, {
+        method: 'DELETE',
+        headers: getAuthHeaders(),
+      })
+      setSessions((prev) => prev.filter((s) => s.session_id !== sessionId))
+    } catch {
+      // Silently ignore
+    } finally {
+      setDeletingId(null)
+    }
+  }
 
   function handleLogout() {
     document.cookie = 'access_token=; path=/; max-age=0; SameSite=Lax'
@@ -125,6 +174,72 @@ export default function DashboardPage() {
                   <p className="text-sm text-gray-500">查看和修改账号信息</p>
                 </a>
               </div>
+            </section>
+
+            {/* Session history */}
+            <section className="mt-10" aria-label="session history">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-semibold text-gray-700">历史对话</h3>
+                <a
+                  href="/chat"
+                  className="px-4 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                  aria-label="new session"
+                >
+                  + 新对话
+                </a>
+              </div>
+
+              {sessionsLoading && (
+                <p className="text-gray-400 text-sm" aria-label="sessions loading">加载历史对话中…</p>
+              )}
+
+              {!sessionsLoading && sessions.length === 0 && (
+                <p className="text-gray-400 text-sm">暂无历史对话，点击「新对话」开始。</p>
+              )}
+
+              {!sessionsLoading && sessions.length > 0 && (
+                <ul className="space-y-3" aria-label="session list">
+                  {sessions.map((s) => (
+                    <li
+                      key={s.session_id}
+                      className="flex items-center justify-between bg-white rounded-xl border px-5 py-4 shadow-sm"
+                      aria-label={`session ${s.session_id}`}
+                    >
+                      <div className="min-w-0 flex-1 mr-4">
+                        <p className="text-sm font-medium text-gray-800 truncate">
+                          {s.title ?? 'AI Agent 对话'}
+                        </p>
+                        <p className="text-xs text-gray-400 mt-0.5">
+                          {s.phase_label} · 第 {s.turn_count} 轮 ·{' '}
+                          {new Date(s.updated_at).toLocaleString('zh-CN', {
+                            month: 'short',
+                            day: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <a
+                          href={`/chat?session=${s.session_id}`}
+                          className="px-3 py-1 text-xs bg-blue-50 text-blue-600 border border-blue-200 rounded-lg hover:bg-blue-100"
+                          aria-label={`resume session ${s.session_id}`}
+                        >
+                          继续
+                        </a>
+                        <button
+                          onClick={() => handleDeleteSession(s.session_id)}
+                          disabled={deletingId === s.session_id}
+                          className="px-3 py-1 text-xs bg-red-50 text-red-500 border border-red-200 rounded-lg hover:bg-red-100 disabled:opacity-50"
+                          aria-label={`delete session ${s.session_id}`}
+                        >
+                          {deletingId === s.session_id ? '删除中…' : '删除'}
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </section>
           </>
         )}

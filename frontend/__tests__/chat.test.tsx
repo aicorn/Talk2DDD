@@ -10,6 +10,12 @@ jest.mock('next/navigation', () => ({
   useRouter: () => ({ push: mockPush }),
 }))
 
+// Provide a valid auth token by default; individual tests override as needed.
+const mockGetAuthHeaders = jest.fn(() => ({ Authorization: 'Bearer test-token' }))
+jest.mock('../lib/auth', () => ({
+  getAuthHeaders: () => mockGetAuthHeaders(),
+}))
+
 // Silence fetch-not-defined warnings in jsdom
 global.fetch = jest.fn()
 
@@ -40,9 +46,17 @@ function agentReply(reply: string, overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   jest.clearAllMocks()
+  // Default: authenticated
+  mockGetAuthHeaders.mockReturnValue({ Authorization: 'Bearer test-token' })
 })
 
 describe('ChatPage', () => {
+  it('redirects to /login when no auth token is present', () => {
+    mockGetAuthHeaders.mockReturnValue({})
+    render(<ChatPage />)
+    expect(mockPush).toHaveBeenCalledWith('/login')
+  })
+
   it('renders the heading', () => {
     render(<ChatPage />)
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Talk2DDD AI 助手')

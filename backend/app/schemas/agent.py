@@ -96,3 +96,17 @@ class PhaseDocumentResponse(BaseModel):
     content: str
     rendered_at: Optional[datetime]
     turn_count: int
+
+
+class ConversationSummary(BaseModel):
+    session_id: str
+    title: Optional[str]
+    phase: str
+    phase_label: str
+    turn_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConversationListResponse(BaseModel):
+    conversations: List[ConversationSummary]

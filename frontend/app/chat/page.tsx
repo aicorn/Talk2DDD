@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -75,6 +75,12 @@ function generateSessionId(): string {
   return `${hex.slice(0, 4).join('')}-${hex.slice(4, 6).join('')}-${hex.slice(6, 8).join('')}-${hex.slice(8, 10).join('')}-${hex.slice(10).join('')}`
 }
 
+/** Read `?session=<uuid>` from the current URL if present. */
+function getSessionIdFromUrl(): string | null {
+  if (typeof window === 'undefined') return null
+  return new URLSearchParams(window.location.search).get('session')
+}
+
 /** Split assistant content into optional <think> block + main reply */
 function parseContent(content: string): { thinking: string | null; reply: string } {
   const match = content.match(/^<think>([\s\S]*?)<\/think>([\s\S]*)$/i)
@@ -108,7 +114,7 @@ function ThinkBlock({ thinking }: { thinking: string }) {
 export default function ChatPage() {
   const router = useRouter()
   const [provider] = useState<Provider>(getStoredProvider)
-  const [sessionId] = useState<string>(() => generateSessionId())
+  const [sessionId] = useState<string>(() => getSessionIdFromUrl() ?? generateSessionId())
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -120,6 +126,14 @@ export default function ChatPage() {
   const [suggestions, setSuggestions] = useState<string[]>([])
   const [phaseDocument, setPhaseDocument] = useState<PhaseDocument | null>(null)
   const [showPhaseDoc, setShowPhaseDoc] = useState(false)
+
+  // Auth guard: redirect to /login when no token is present
+  useEffect(() => {
+    const headers = getAuthHeaders()
+    if (!headers.Authorization) {
+      router.push('/login')
+    }
+  }, [])
 
   async function sendMessage(overrideText?: string) {
     const trimmed = (overrideText ?? input).trim()
