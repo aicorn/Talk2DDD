@@ -167,8 +167,9 @@ class AgentCore:
         await self._context_manager.append_messages(session_id, message, ai_reply, db)
 
         # 10. Trigger async memory compression if threshold reached (Layer 2).
-        #     This is fire-and-forget; failures are logged but never propagate.
-        await self._memory_manager.maybe_compress(ctx, db, provider=provider)
+        #     The background task opens its own DB session so the request-scoped
+        #     session (now committed) is never touched after this point.
+        await self._memory_manager.maybe_compress(ctx, provider=provider)
 
         # 11. Build response
         return AgentResponse(

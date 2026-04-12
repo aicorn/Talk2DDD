@@ -659,60 +659,50 @@ class TestMemoryManagerShouldCompress:
 
     def test_no_compression_before_trigger_turns(self):
         from app.agent.memory_manager import MemoryManager
-        from unittest.mock import AsyncMock
 
         mm = MemoryManager()
         ctx = make_context()
         ctx.turn_count = 5  # below default trigger of 10
-        db = AsyncMock()
-        assert mm._should_compress(ctx, db) is False
+        assert mm._should_compress(ctx) is False
 
     def test_first_compression_fires_at_trigger_turns(self):
         from app.agent.memory_manager import MemoryManager
-        from unittest.mock import AsyncMock
 
         mm = MemoryManager()
         ctx = make_context()
         ctx.turn_count = 10  # equals default trigger
         ctx.summary_last_updated_turn = 0
-        db = AsyncMock()
-        assert mm._should_compress(ctx, db) is True
+        assert mm._should_compress(ctx) is True
 
     def test_no_duplicate_first_fire_when_already_updated(self):
         from app.agent.memory_manager import MemoryManager
-        from unittest.mock import AsyncMock
 
         mm = MemoryManager()
         ctx = make_context()
         ctx.turn_count = 10
         ctx.summary_last_updated_turn = 10  # already fired
-        db = AsyncMock()
         # Neither first-fire nor periodic (delta = 0, < interval 5)
-        assert mm._should_compress(ctx, db) is False
+        assert mm._should_compress(ctx) is False
 
     def test_periodic_refresh_fires_after_interval(self):
         from app.agent.memory_manager import MemoryManager
-        from unittest.mock import AsyncMock
 
         mm = MemoryManager()
         ctx = make_context()
         ctx.turn_count = 15
         ctx.summary_last_updated_turn = 10  # first fire already happened
-        db = AsyncMock()
         # delta = 5 == refresh_interval (default 5) → should fire
-        assert mm._should_compress(ctx, db) is True
+        assert mm._should_compress(ctx) is True
 
     def test_periodic_refresh_does_not_fire_between_intervals(self):
         from app.agent.memory_manager import MemoryManager
-        from unittest.mock import AsyncMock
 
         mm = MemoryManager()
         ctx = make_context()
         ctx.turn_count = 13
         ctx.summary_last_updated_turn = 10
-        db = AsyncMock()
         # delta = 3 < interval 5 → should NOT fire
-        assert mm._should_compress(ctx, db) is False
+        assert mm._should_compress(ctx) is False
 
 
 class TestMemoryManagerGetMessagesForAI:

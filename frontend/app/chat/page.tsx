@@ -113,6 +113,7 @@ export default function ChatPage() {
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [lastFailedMessage, setLastFailedMessage] = useState<string | null>(null)
   // Agent state
   const [phase, setPhase] = useState<string>('ICEBREAK')
   const [progress, setProgress] = useState<number>(0)
@@ -151,12 +152,14 @@ export default function ChatPage() {
       setPhase(data.phase)
       setProgress(data.progress)
       setSuggestions(data.suggestions ?? [])
+      setLastFailedMessage(null)
       if (data.phase_document) {
         setPhaseDocument(data.phase_document)
         setShowPhaseDoc(true)
       }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : '发生未知错误，请重试')
+      setLastFailedMessage(trimmed)
     } finally {
       setLoading(false)
     }
@@ -167,6 +170,24 @@ export default function ChatPage() {
       e.preventDefault()
       sendMessage()
     }
+  }
+
+  /** Re-send the last failed message: remove its bubble then replay it. */
+  function retryLastMessage() {
+    if (!lastFailedMessage || loading) return
+    // Capture the value before clearing state so sendMessage receives the
+    // correct text even after the state updates are batched.
+    const msgToRetry = lastFailedMessage
+    // Remove the last user bubble that was appended when the message first failed
+    setMessages((prev) => {
+      if (prev.length > 0 && prev[prev.length - 1].role === 'user') {
+        return prev.slice(0, -1)
+      }
+      return prev
+    })
+    setError(null)
+    setLastFailedMessage(null)
+    sendMessage(msgToRetry)
   }
 
   const phaseIndex = PHASE_KEYS.indexOf(phase as (typeof PHASE_KEYS)[number])
@@ -281,9 +302,19 @@ export default function ChatPage() {
           )}
 
           {error && (
-            <p className="text-red-500 text-sm mb-2" role="alert">
-              ⚠️ {error}
-            </p>
+            <div className="flex items-center gap-2 mb-2 flex-wrap" role="alert">
+              <p className="text-red-500 text-sm">⚠️ {error}</p>
+              {lastFailedMessage && (
+                <button
+                  onClick={retryLastMessage}
+                  disabled={loading}
+                  className="flex items-center gap-1 px-3 py-1 text-xs bg-red-50 text-red-600 border border-red-200 rounded-full hover:bg-red-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                  aria-label="retry last message"
+                >
+                  🔄 重试
+                </button>
+              )}
+            </div>
           )}
 
           {/* Input area */}

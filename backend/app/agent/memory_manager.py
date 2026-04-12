@@ -70,6 +70,12 @@ def _format_messages_for_summary(messages: List[Dict[str, Any]]) -> str:
 class MemoryManager:
     """Manages the three-layer memory model for a single session."""
 
+    def __init__(self) -> None:
+        # Import here to avoid circular imports at module load time.
+        from app.agent.context_manager import ContextManager
+
+        self._context_manager = ContextManager()
+
     # ------------------------------------------------------------------ #
     # Public API                                                           #
     # ------------------------------------------------------------------ #
@@ -146,36 +152,33 @@ class MemoryManager:
     async def maybe_compress(
         self,
         ctx: AgentContext,
-        db: AsyncSession,
         provider: Optional[str] = None,
     ) -> None:
         """Conditionally compress older turns into the rolling summary.
 
         Runs the actual AI compression call **asynchronously in the
-        background** so the calling code (agent_core) does not need to await
-        it.  The AgentContext is mutated in-place and saved back to the DB
-        *only if* the compression succeeds; failures are silently swallowed
-        so the main conversation is never disrupted.
+        background** with a **fresh DB session** so the calling code
+        (agent_core) does not need to await it, and the request-scoped
+        session that has already been committed/closed by FastAPI cannot
+        interfere.  Failures are silently logged so the main conversation
+        is never disrupted.
 
         Triggers (any one suffices):
         * First fire:   ``turn_count >= summary_trigger_turns``
         * Periodic:     ``(turn_count - summary_last_updated_turn)
                           >= summary_refresh_interval``  AND first already fired
-        * Budget:       estimated token count of recent history exceeds the
-                        input budget minus system-prompt overhead
 
         Args:
-            ctx: Current ``AgentContext`` (mutated in-place on success).
-            db:  Active SQLAlchemy async session.
+            ctx: Current ``AgentContext`` (a snapshot; the background task
+                 saves its own updated copy back to the DB).
             provider: AI provider name string (forwarded to ``chat_completion``).
         """
-        if not self._should_compress(ctx, db):
+        if not self._should_compress(ctx):
             return
-        # Fire and forget – errors are logged but not propagated.
-        # create_task is preferred over ensure_future so the task is properly
-        # tracked by the running event loop and can be cleanly cancelled on shutdown.
+        # Fire and forget – each background task opens and closes its own DB
+        # session, so it is completely independent of the request lifecycle.
         asyncio.create_task(
-            self._do_compress(ctx, db, provider),
+            self._compress_in_background(ctx, provider),
         )
 
     def estimate_tokens(self, messages: List[Dict[str, Any]]) -> int:
@@ -200,11 +203,7 @@ class MemoryManager:
     # Private helpers                                                      #
     # ------------------------------------------------------------------ #
 
-    def _should_compress(
-        self,
-        ctx: AgentContext,
-        db: AsyncSession,  # reserved for future budget-check
-    ) -> bool:
+    def _should_compress(self, ctx: AgentContext) -> bool:
         """Return True if compression should be triggered this turn."""
         cfg = ctx.memory_config
         turn = ctx.turn_count
@@ -250,6 +249,32 @@ class MemoryManager:
             if msg.role in ("user", "assistant")
         ]
 
+    async def _compress_in_background(
+        self,
+        ctx: AgentContext,
+        provider: Optional[str],
+    ) -> None:
+        """Open a fresh DB session and run compression.
+
+        Using a dedicated session instead of the request-scoped one prevents
+        SQLAlchemy ``InvalidRequestError`` errors that occur when the
+        background task wakes up after ``get_db()`` has already committed and
+        closed the original session.
+        """
+        from app.database.session import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as db:
+            try:
+                await self._do_compress(ctx, db, provider)
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                logger.warning(
+                    "MemoryManager: background compression failed for session=%s.",
+                    ctx.session_id,
+                    exc_info=True,
+                )
+
     async def _do_compress(
         self,
         ctx: AgentContext,
@@ -258,59 +283,49 @@ class MemoryManager:
     ) -> None:
         """Perform the actual compression and persist the result.
 
-        This is the background coroutine spawned by ``maybe_compress``.
-        All exceptions are caught and logged so they never propagate to the
-        main request context.
+        Called exclusively from ``_compress_in_background`` which owns the
+        session lifecycle (commit/rollback).
         """
         # Import here to avoid circular imports at module load time.
-        from app.agent.context_manager import ContextManager
         from app.services.ai_service import chat_completion
 
-        try:
-            cfg = ctx.memory_config
-            all_messages = await self._load_all_messages(ctx.session_id, db)
-            if not all_messages:
-                return
+        cfg = ctx.memory_config
+        all_messages = await self._load_all_messages(ctx.session_id, db)
+        if not all_messages:
+            return
 
-            # Messages already covered by the existing summary should not be
-            # re-compressed; only process newly accumulated turns.
-            # Since messages are stored as alternating user/assistant pairs,
-            # summary_covers_turns * 2 gives the correct message index offset.
-            already_covered = ctx.summary_covers_turns * 2  # turns → message index
-            messages_to_summarise = all_messages[already_covered:]
-            if not messages_to_summarise:
-                return
+        # Messages already covered by the existing summary should not be
+        # re-compressed; only process newly accumulated turns.
+        # Since messages are stored as alternating user/assistant pairs,
+        # summary_covers_turns * 2 gives the correct message index offset.
+        already_covered = ctx.summary_covers_turns * 2  # turns → message index
+        messages_to_summarise = all_messages[already_covered:]
+        if not messages_to_summarise:
+            return
 
-            prompt_text = _COMPRESSION_PROMPT.format(
-                max_chars=_SUMMARY_MAX_CHARS,
-                existing_summary=ctx.conversation_summary or "（暂无）",
-                new_messages=_format_messages_for_summary(messages_to_summarise),
-            )
+        prompt_text = _COMPRESSION_PROMPT.format(
+            max_chars=_SUMMARY_MAX_CHARS,
+            existing_summary=ctx.conversation_summary or "（暂无）",
+            new_messages=_format_messages_for_summary(messages_to_summarise),
+        )
 
-            new_summary = await chat_completion(
-                messages=[{"role": "user", "content": prompt_text}],
-                provider=provider,
-            )
+        new_summary = await chat_completion(
+            messages=[{"role": "user", "content": prompt_text}],
+            provider=provider,
+        )
 
-            # Guard against concurrent writes: only update if we processed
-            # a later set of turns than the current stored summary.
-            new_covers = len(all_messages) // 2  # total turns (pairs)
-            if new_covers > ctx.summary_covers_turns:
-                ctx.conversation_summary = new_summary.strip()
-                ctx.summary_last_updated_turn = ctx.turn_count
-                ctx.summary_covers_turns = new_covers
-                # Persist the updated context back to the DB.
-                await ContextManager().save(ctx, db)
-                logger.debug(
-                    "MemoryManager: compressed %d turns → %d-char summary (session=%s)",
-                    new_covers,
-                    len(ctx.conversation_summary),
-                    ctx.session_id,
-                )
-        except Exception:
-            logger.warning(
-                "MemoryManager: compression failed for session=%s; "
-                "continuing without updated summary.",
+        # Guard against concurrent writes: only update if we processed
+        # a later set of turns than the current stored summary.
+        new_covers = len(all_messages) // 2  # total turns (pairs)
+        if new_covers > ctx.summary_covers_turns:
+            ctx.conversation_summary = new_summary.strip()
+            ctx.summary_last_updated_turn = ctx.turn_count
+            ctx.summary_covers_turns = new_covers
+            # Flush context update – the caller commits the transaction.
+            await self._context_manager.save(ctx, db)
+            logger.debug(
+                "MemoryManager: compressed %d turns → %d-char summary (session=%s)",
+                new_covers,
+                len(ctx.conversation_summary),
                 ctx.session_id,
-                exc_info=True,
             )
