@@ -525,7 +525,7 @@ class TestContextManagerHistory:
 
         assert len(history) == ContextManager.MAX_HISTORY_MESSAGES
         # Should be the LAST messages
-        assert history[-1]["content"] == f"msg{59}"
+        assert history[-1]["content"] == "msg59"
 
     @pytest.mark.asyncio
     async def test_load_messages_returns_empty_when_no_conversation(self):
@@ -556,7 +556,7 @@ class TestContextManagerHistory:
 
     @pytest.mark.asyncio
     async def test_append_messages_adds_user_and_assistant_records(self):
-        from unittest.mock import AsyncMock, MagicMock, call, patch
+        from unittest.mock import AsyncMock, MagicMock
         from app.agent.context_manager import ContextManager
 
         cm = ContextManager()
