@@ -414,6 +414,8 @@ class TestPhaseDocumentRenderer:
 # ---------------------------------------------------------------------------
 
 
+
+
 class TestAgentContext:
     def test_get_stale_documents(self):
         ctx = make_context()
@@ -445,3 +447,145 @@ class TestAgentContext:
         assert ctx.generated_documents[0].status == DocumentStatus.SUPERSEDED
         assert ctx.generated_documents[1].status == DocumentStatus.CURRENT
         assert ctx.generated_documents[1].version_id == "new-version-id"
+
+
+# ---------------------------------------------------------------------------
+# ContextManager — conversation history helpers
+# ---------------------------------------------------------------------------
+
+
+class _FakeMessage:
+    """Minimal stand-in for app.models.conversation.Message in unit tests."""
+
+    def __init__(self, role: str, content: str) -> None:
+        self.role = role
+        self.content = content
+
+
+class _FakeConversation:
+    def __init__(self, messages: list) -> None:
+        self.messages = messages
+
+
+class TestContextManagerHistory:
+    """Unit-tests for load_messages / append_messages (DB is mocked)."""
+
+    @pytest.mark.asyncio
+    async def test_load_messages_returns_user_and_assistant_only(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock
+        from app.agent.context_manager import ContextManager
+
+        cm = ContextManager()
+        session_id = "00000000-0000-0000-0000-000000000002"
+
+        fake_messages = [
+            _FakeMessage("system", "system prompt"),
+            _FakeMessage("user", "你好"),
+            _FakeMessage("assistant", "嗨，欢迎！"),
+            _FakeMessage("user", "我的项目是电商平台"),
+            _FakeMessage("assistant", "请详细描述一下"),
+        ]
+        fake_convo = _FakeConversation(fake_messages)
+
+        db = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = fake_convo
+        db.execute = AsyncMock(return_value=mock_result)
+
+        history = await cm.load_messages(session_id, db)
+
+        # system message is excluded
+        assert all(m["role"] != "system" for m in history)
+        assert len(history) == 4
+        assert history[0] == {"role": "user", "content": "你好"}
+        assert history[1] == {"role": "assistant", "content": "嗨，欢迎！"}
+
+    @pytest.mark.asyncio
+    async def test_load_messages_trims_to_max(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from app.agent.context_manager import ContextManager
+
+        cm = ContextManager()
+        session_id = "00000000-0000-0000-0000-000000000002"
+
+        # Create more than MAX_HISTORY_MESSAGES messages
+        many = [
+            _FakeMessage("user" if i % 2 == 0 else "assistant", f"msg{i}")
+            for i in range(60)
+        ]
+        fake_convo = _FakeConversation(many)
+
+        db = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = fake_convo
+        db.execute = AsyncMock(return_value=mock_result)
+
+        history = await cm.load_messages(session_id, db)
+
+        assert len(history) == ContextManager.MAX_HISTORY_MESSAGES
+        # Should be the LAST messages
+        assert history[-1]["content"] == f"msg{59}"
+
+    @pytest.mark.asyncio
+    async def test_load_messages_returns_empty_when_no_conversation(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from app.agent.context_manager import ContextManager
+
+        cm = ContextManager()
+        session_id = "00000000-0000-0000-0000-000000000003"
+
+        db = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+        db.execute = AsyncMock(return_value=mock_result)
+
+        history = await cm.load_messages(session_id, db)
+        assert history == []
+
+    @pytest.mark.asyncio
+    async def test_load_messages_returns_empty_for_invalid_uuid(self):
+        from unittest.mock import AsyncMock
+        from app.agent.context_manager import ContextManager
+
+        cm = ContextManager()
+        db = AsyncMock()
+        history = await cm.load_messages("not-a-valid-uuid", db)
+        assert history == []
+        db.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_append_messages_adds_user_and_assistant_records(self):
+        from unittest.mock import AsyncMock, MagicMock, call, patch
+        from app.agent.context_manager import ContextManager
+
+        cm = ContextManager()
+        session_id = "00000000-0000-0000-0000-000000000002"
+
+        db = AsyncMock()
+        db.flush = AsyncMock()
+
+        added_objects = []
+        db.add = MagicMock(side_effect=added_objects.append)
+
+        await cm.append_messages(session_id, "用户消息", "AI 回复", db)
+
+        assert len(added_objects) == 2
+        assert added_objects[0].role == "user"
+        assert added_objects[0].content == "用户消息"
+        assert added_objects[1].role == "assistant"
+        assert added_objects[1].content == "AI 回复"
+        db.flush.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_append_messages_noop_for_invalid_uuid(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from app.agent.context_manager import ContextManager
+
+        cm = ContextManager()
+        db = AsyncMock()
+        db.add = MagicMock()
+
+        await cm.append_messages("bad-uuid", "msg", "reply", db)
+
+        db.add.assert_not_called()

@@ -3,20 +3,23 @@
 from __future__ import annotations
 
 import uuid
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.agent.context import AgentContext
-from app.models.conversation import Conversation
+from app.models.conversation import Conversation, Message
 
 
 class ContextManager:
     """Persist and retrieve AgentContext using the Conversation.extra_data JSON column."""
 
     _KEY = "agent_context"
+    # Maximum number of recent messages to include in each AI call (keeps token usage bounded)
+    MAX_HISTORY_MESSAGES = 40
 
     async def load(
         self,
@@ -50,6 +53,39 @@ class ContextManager:
 
         return ctx
 
+    async def load_messages(
+        self,
+        session_id: str,
+        db: AsyncSession,
+    ) -> List[Dict[str, Any]]:
+        """Return the recent conversation messages for *session_id* as OpenAI-style dicts.
+
+        Returns an empty list if the conversation doesn't exist or has no messages.
+        Only returns ``user`` and ``assistant`` roles (system messages are excluded
+        because the caller constructs the system prompt separately).
+        """
+        try:
+            conv_uuid = uuid.UUID(session_id)
+        except ValueError:
+            return []
+
+        result = await db.execute(
+            select(Conversation)
+            .where(Conversation.id == conv_uuid)
+            .options(selectinload(Conversation.messages))
+        )
+        convo = result.scalar_one_or_none()
+        if convo is None:
+            return []
+
+        history = [
+            {"role": msg.role, "content": msg.content}
+            for msg in convo.messages
+            if msg.role in ("user", "assistant")
+        ]
+        # Trim to most-recent N messages to keep token usage bounded
+        return history[-self.MAX_HISTORY_MESSAGES :]
+
     async def save(self, ctx: AgentContext, db: AsyncSession) -> None:
         """Persist *ctx* back into the Conversation record."""
         try:
@@ -68,4 +104,33 @@ class ContextManager:
         extra[self._KEY] = ctx.model_dump(mode="json")
         convo.extra_data = extra
         flag_modified(convo, "extra_data")
+        await db.flush()
+
+    async def append_messages(
+        self,
+        session_id: str,
+        user_message: str,
+        assistant_reply: str,
+        db: AsyncSession,
+    ) -> None:
+        """Persist a user + assistant message pair to the Message table."""
+        try:
+            conv_uuid = uuid.UUID(session_id)
+        except ValueError:
+            return
+
+        db.add(
+            Message(
+                conversation_id=conv_uuid,
+                role="user",
+                content=user_message,
+            )
+        )
+        db.add(
+            Message(
+                conversation_id=conv_uuid,
+                role="assistant",
+                content=assistant_reply,
+            )
+        )
         await db.flush()

@@ -126,10 +126,10 @@ class AgentCore:
         # 3. Build system prompt
         system_prompt = self._prompt_builder.build(ctx)
 
-        # 4. Call AI (pass full conversation history from context + current message)
+        # 4. Call AI (pass full conversation history from DB + current message)
+        history = await self._context_manager.load_messages(session_id, db)
         messages = [{"role": "system", "content": system_prompt}]
-        # Include recent conversation messages from DB for continuity
-        # (We use a minimal representation here; full history is in the DB)
+        messages.extend(history)
         messages.append({"role": "user", "content": message})
 
         ai_reply = await chat_completion(messages=messages, provider=provider)
@@ -159,8 +159,9 @@ class AgentCore:
             turn_count=ctx.turn_count,
         )
 
-        # 9. Persist context
+        # 9. Persist context and conversation messages
         await self._context_manager.save(ctx, db)
+        await self._context_manager.append_messages(session_id, message, ai_reply, db)
 
         # 10. Build response
         return AgentResponse(
