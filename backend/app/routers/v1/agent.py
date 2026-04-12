@@ -323,6 +323,7 @@ async def list_sessions(
 
     items: list[ConversationSummary] = []
     for conv in convs:
+        # Fall back to ICEBREAK if the conversation hasn't started an agent session yet
         phase_val = conv.agent_phase or Phase.ICEBREAK.value
         turn_count = 0
         if conv.extra_data and "agent_context" in conv.extra_data:

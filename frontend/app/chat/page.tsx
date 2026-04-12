@@ -133,7 +133,7 @@ export default function ChatPage() {
     if (!headers.Authorization) {
       router.push('/login')
     }
-  }, [])
+  }, [router])
 
   async function sendMessage(overrideText?: string) {
     const trimmed = (overrideText ?? input).trim()

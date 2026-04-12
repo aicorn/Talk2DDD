@@ -81,13 +81,15 @@ export default function DashboardPage() {
   async function handleDeleteSession(sessionId: string) {
     setDeletingId(sessionId)
     try {
-      await fetch(`${API_URL}/api/v1/agent/sessions/${sessionId}`, {
+      const res = await fetch(`${API_URL}/api/v1/agent/sessions/${sessionId}`, {
         method: 'DELETE',
         headers: getAuthHeaders(),
       })
-      setSessions((prev) => prev.filter((s) => s.session_id !== sessionId))
+      if (res.ok) {
+        setSessions((prev) => prev.filter((s) => s.session_id !== sessionId))
+      }
     } catch {
-      // Silently ignore
+      // Silently ignore network errors
     } finally {
       setDeletingId(null)
     }
