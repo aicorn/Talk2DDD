@@ -256,9 +256,11 @@ Messages 列表
 
 | 条件 | 说明 | 默认阈值 |
 |------|------|----------|
-| 轮次超限 | `turn_count > SUMMARY_TRIGGER_TURNS` | 10 轮 |
+| 首次触发 | `turn_count >= SUMMARY_TRIGGER_TURNS`，首次启动压缩 | 10 轮 |
 | Token 超预算 | 预估输入 token 超过 `MAX_INPUT_TOKENS` | 6000 tokens |
-| 定期刷新 | 每 `SUMMARY_REFRESH_INTERVAL` 轮强制刷新摘要 | 5 轮 |
+| 定期刷新 | 首次触发后，每满 `SUMMARY_REFRESH_INTERVAL` 轮增量刷新摘要 | 每 5 轮（即第 10、15、20 轮…） |
+
+> **说明**：`SUMMARY_REFRESH_INTERVAL`（默认 5）是在首次触发（第 10 轮）之后的增量刷新频率，而非从第 1 轮开始计算。两个参数不冲突：前者控制"何时开始"，后者控制"之后多久刷新一次"。
 
 **压缩算法**（逐步累积式）：
 
@@ -311,8 +313,9 @@ AgentContext
 │
 └── memory_config: MemoryConfig       # 记忆参数配置
     ├── immediate_memory_turns: int   # K 值（保留最近 K 轮原文），默认 10
-    ├── summary_trigger_turns: int    # 超过此轮次开始压缩，默认 10
-    ├── summary_refresh_interval: int # 每隔 M 轮刷新一次摘要，默认 5
+    ├── min_immediate_memory_turns: int # K 值下限（token 超预算时自动缩减 K，但不低于此值），默认 2
+    ├── summary_trigger_turns: int    # 首次压缩阈值（turn_count >= 此值时触发），默认 10
+    ├── summary_refresh_interval: int # 首次压缩后每隔 M 轮增量刷新摘要，默认 5
     └── max_input_tokens: int         # 输入 token 预算，默认 6000
 ```
 
@@ -421,16 +424,23 @@ class MemoryManager:
 │ Layer 2: 当前阶段指令（按阶段切换）                               │
 │   "当前处于「需求收集」阶段，你的任务是..."                        │
 ├────────────────────────────────────────────────────────────────┤
-│ Layer 3: 已积累的领域上下文（动态注入）                           │
+│ Layer 3: 对话记忆摘要（动态，可选）— 由 MemoryManager 提供        │
+│   "[MEMORY_SUMMARY] 项目背景：... 已确认需求：...                │
+│    [/MEMORY_SUMMARY]"                                          │
+│   注：仅在 conversation_summary 非空时插入（见 §4.4.6）          │
+├────────────────────────────────────────────────────────────────┤
+│ Layer 4: 已积累的领域上下文（动态注入）                           │
 │   "[CONTEXT_BLOCK] ... [/CONTEXT_BLOCK]"                       │
 ├────────────────────────────────────────────────────────────────┤
-│ Layer 4: 工具调用格式说明（可选，按需开启）                        │
+│ Layer 5: 工具调用格式说明（可选，按需开启）                        │
 │   "当识别出新领域概念时，调用 extract_domain_concepts 工具..."    │
 ├────────────────────────────────────────────────────────────────┤
-│ Layer 5: 输出格式约束（按阶段）                                   │
+│ Layer 6: 输出格式约束（按阶段）                                   │
 │   "每次回复末尾必须包含 [NEXT_QUESTION] 标记..."                  │
 └────────────────────────────────────────────────────────────────┘
 ```
+
+> **变更说明**：§4.4 中引入 MemoryManager 后，System Prompt 由原来的 5 层扩展为 6 层。Layer 3 新增对话记忆摘要区块 `[MEMORY_SUMMARY]`，原 Layer 3（领域上下文）顺移为 Layer 4，其余层依次后移。
 
 ### 5.2 各阶段 System Prompt 要点
 
