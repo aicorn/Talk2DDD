@@ -115,6 +115,14 @@ async def agent_chat(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"AI provider error: {exc}",
         ) from exc
+    except Exception as exc:
+        # Catch-all: any unhandled exception (DB errors, unexpected failures)
+        # must return a proper HTTP error instead of letting Uvicorn close the
+        # connection (which would produce ECONNRESET on the proxy side).
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error: {exc}",
+        ) from exc
 
     phase_doc = None
     if result.phase_document:
@@ -178,6 +186,11 @@ async def generate_document(
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Document generation error: {exc}",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error: {exc}",
         ) from exc
 
     return GenerateDocumentResponse(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -73,9 +74,9 @@ _PHASE_SUGGESTIONS: dict[Phase, List[str]] = {
         "输入 /generate 直接生成文档",
     ],
     Phase.DOC_GENERATE: [
-        "输入 /generate DOMAIN_MODEL 生成领域模型文档",
-        "输入 /generate BUSINESS_REQUIREMENT 生成业务需求文档",
-        "输入 /generate UBIQUITOUS_LANGUAGE 生成通用语言术语表",
+        "点击下方按钮生成「领域模型文档」",
+        "点击下方按钮生成「业务需求文档」",
+        "输入 /next 进入审阅完善阶段",
     ],
     Phase.REVIEW_REFINE: [
         "请审阅已生成的文档，提出修改意见",
@@ -91,6 +92,13 @@ _DOC_TYPE_LABELS: dict[str, str] = {
     "USE_CASES": "用例说明",
     "TECH_ARCHITECTURE": "技术架构建议",
 }
+
+# Matches "/generate [DOC_TYPE]" — these commands trigger the document pipeline
+# directly to avoid long AI responses in the chat endpoint.
+_GENERATE_DOC_RE = re.compile(
+    r"/generate\s+(BUSINESS_REQUIREMENT|DOMAIN_MODEL|UBIQUITOUS_LANGUAGE|USE_CASES|TECH_ARCHITECTURE)",
+    re.IGNORECASE,
+)
 
 
 class AgentCore:
@@ -124,6 +132,22 @@ class AgentCore:
         if new_phase and new_phase != ctx.current_phase:
             phase_transition_reason = f"auto: {ctx.current_phase.value} → {new_phase.value}"
             self._phase_engine.advance_phase(ctx, new_phase, phase_transition_reason)
+
+        # 2b. Intercept "/generate [DOC_TYPE]" — call the document pipeline directly
+        #     instead of sending the command to the chat AI. The chat AI would try to
+        #     output the full document as its reply (thousands of tokens), which causes
+        #     the Next.js proxy to ECONNRESET before the backend finishes responding.
+        gen_match = _GENERATE_DOC_RE.search(message)
+        if gen_match:
+            doc_type_str = gen_match.group(1).upper()
+            try:
+                doc_type = DocumentType(doc_type_str)
+            except ValueError:
+                doc_type = None
+            if doc_type is not None:
+                return await self._handle_generate_command(
+                    ctx, session_id, message, doc_type, db, provider
+                )
 
         # 3. Build system prompt (with optional rolling summary – Layer 2)
         summary_block = self._memory_manager.get_summary_block(ctx)
@@ -224,6 +248,61 @@ class AgentCore:
     # Private helpers
     # ------------------------------------------------------------------
 
+    async def _handle_generate_command(
+        self,
+        ctx: AgentContext,
+        session_id: str,
+        user_message: str,
+        doc_type: DocumentType,
+        db: AsyncSession,
+        provider: Optional[str],
+    ) -> AgentResponse:
+        """Handle a /generate [DOC_TYPE] command inside the chat turn.
+
+        Calls the document pipeline directly (skipping the chat AI) so the
+        chat endpoint returns quickly.  The generated document is surfaced in
+        ``phase_document`` so the frontend can display it in the side panel.
+        """
+        doc_label = _DOC_TYPE_LABELS.get(doc_type.value, doc_type.value)
+
+        content = await self._doc_pipeline.generate(ctx, doc_type, provider=provider)
+
+        # Record the document in context (same as generate_document())
+        import uuid as _uuid
+        version_id = str(_uuid.uuid4())
+        ctx.add_document_ref(doc_type.value, version_id)
+        ctx.turn_count += 1
+
+        ai_reply = (
+            f"✅ **{doc_label}**已生成完毕！请查看右侧文档面板。\n\n"
+            "您可以继续生成其他类型文档，或输入 `/next` 进入审阅完善阶段。"
+        )
+
+        phase_doc = PhaseDocumentResult(
+            phase=ctx.current_phase.value,
+            title=doc_label,
+            content=content,
+            rendered_at=datetime.now(timezone.utc),
+            turn_count=ctx.turn_count,
+        )
+
+        await self._context_manager.save(ctx, db)
+        await self._context_manager.append_messages(session_id, user_message, ai_reply, db)
+
+        return AgentResponse(
+            reply=ai_reply,
+            session_id=session_id,
+            phase=ctx.current_phase.value,
+            phase_label=PHASE_LABELS.get(ctx.current_phase, ctx.current_phase.value),
+            progress=PHASE_PROGRESS.get(ctx.current_phase, 0.0),
+            suggestions=_PHASE_SUGGESTIONS.get(ctx.current_phase, []),
+            extracted_concepts=self._format_concepts(ctx),
+            requirement_changes=self._format_requirement_changes(ctx),
+            stale_documents=ctx.get_stale_documents(),
+            pending_documents=self._pending_document_types(ctx),
+            phase_document=phase_doc,
+        )
+
     def _format_concepts(self, ctx: AgentContext) -> List[Dict[str, Any]]:
         return [
             {
@@ -253,7 +332,7 @@ class AgentCore:
             d.document_type for d in ctx.generated_documents
         }
         return [
-            f"{dt.value}（{_DOC_TYPE_LABELS.get(dt.value, dt.value)}）"
+            dt.value
             for dt in DocumentType
             if dt.value not in generated_types
         ]

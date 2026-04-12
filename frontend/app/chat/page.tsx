@@ -52,6 +52,14 @@ const PHASE_LABELS: Record<string, string> = {
   REVIEW_REFINE: '审阅完善',
 }
 
+const DOC_TYPE_LABELS: Record<string, string> = {
+  BUSINESS_REQUIREMENT: '业务需求文档',
+  DOMAIN_MODEL: '领域模型文档',
+  UBIQUITOUS_LANGUAGE: '通用语言术语表',
+  USE_CASES: '用例说明',
+  TECH_ARCHITECTURE: '技术架构建议',
+}
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? ''
 const THINK_PREVIEW_LEN = 60
 
@@ -128,6 +136,8 @@ export default function ChatPage() {
   const [suggestions, setSuggestions] = useState<string[]>([])
   const [phaseDocument, setPhaseDocument] = useState<PhaseDocument | null>(null)
   const [showPhaseDoc, setShowPhaseDoc] = useState(false)
+  const [pendingDocuments, setPendingDocuments] = useState<string[]>([])
+  const [generatingDoc, setGeneratingDoc] = useState<string | null>(null)
 
   // Auth guard: redirect to /login when no token is present
   useEffect(() => {
@@ -236,6 +246,7 @@ export default function ChatPage() {
       setPhase(data.phase)
       setProgress(data.progress)
       setSuggestions(data.suggestions ?? [])
+      setPendingDocuments(data.pending_documents ?? [])
       setLastFailedMessage(null)
       if (data.phase_document) {
         setPhaseDocument(data.phase_document)
@@ -272,6 +283,49 @@ export default function ChatPage() {
     setError(null)
     setLastFailedMessage(null)
     sendMessage(msgToRetry)
+  }
+
+  /** Call /generate-document directly (bypasses chat AI to avoid ECONNRESET). */
+  async function generateDocument(documentType: string) {
+    if (generatingDoc || loading) return
+    setGeneratingDoc(documentType)
+    setError(null)
+    try {
+      const res = await fetch(`${API_URL}/api/v1/agent/generate-document`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders(),
+        },
+        body: JSON.stringify({ session_id: sessionId, document_type: documentType, provider }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.detail ?? `HTTP ${res.status}`)
+      }
+      const data = await res.json()
+      const label = DOC_TYPE_LABELS[documentType] ?? documentType
+      // Add a system message into the chat to confirm generation
+      setMessages((prev) => [
+        ...prev,
+        { role: 'assistant', content: `✅ **${label}**已生成完毕！请查看右侧文档面板。` },
+      ])
+      // Display the generated document in the side panel
+      setPhaseDocument({
+        phase,
+        title: label,
+        content: data.content,
+        rendered_at: data.generated_at,
+        turn_count: 0,
+      })
+      setShowPhaseDoc(true)
+      // Remove this doc type from the pending list
+      setPendingDocuments((prev) => prev.filter((t) => t !== documentType))
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : '文档生成失败，请重试')
+    } finally {
+      setGeneratingDoc(null)
+    }
   }
 
   const phaseIndex = PHASE_KEYS.indexOf(phase as (typeof PHASE_KEYS)[number])
@@ -383,6 +437,23 @@ export default function ChatPage() {
                   className="px-2 py-1 text-xs bg-blue-50 text-blue-600 rounded-full border border-blue-200 hover:bg-blue-100"
                 >
                   {s}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Document generation buttons — shown in DOC_GENERATE / REVIEW_REFINE phases */}
+          {pendingDocuments.length > 0 && (
+            <div className="flex flex-wrap gap-1 mb-2" aria-label="generate document buttons">
+              <span className="text-xs text-gray-500 self-center mr-1">生成文档：</span>
+              {pendingDocuments.map((docType) => (
+                <button
+                  key={docType}
+                  onClick={() => generateDocument(docType)}
+                  disabled={!!generatingDoc || loading}
+                  className="px-2 py-1 text-xs bg-green-50 text-green-700 rounded-full border border-green-200 hover:bg-green-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {generatingDoc === docType ? '⏳ 生成中…' : `📄 ${DOC_TYPE_LABELS[docType] ?? docType}`}
                 </button>
               ))}
             </div>
