@@ -192,15 +192,18 @@ export default function ChatPage() {
             }
           }
         }
-      } catch {
-        // Non-critical: silently ignore restore errors
+      } catch (err) {
+        // Non-critical: session restore failure degrades gracefully to an empty chat.
+        // Log for debugging but do not surface an error to the user.
+        console.warn('[ChatPage] Failed to restore session:', err)
       } finally {
         setRestoring(false)
       }
     }
     restoreSession()
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  // isResume and sessionId are stable constants initialised once from the URL;
+  // API_URL is a module-level constant — all are safe to include as deps.
+  }, [isResume, sessionId])
 
   async function sendMessage(overrideText?: string) {
     const trimmed = (overrideText ?? input).trim()
