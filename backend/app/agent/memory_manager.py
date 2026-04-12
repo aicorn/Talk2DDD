@@ -102,8 +102,12 @@ class MemoryManager:
         if not all_messages:
             return []
 
-        # Each "turn" = 1 user + 1 assistant message (2 messages).
+        # Messages are always stored as alternating user/assistant pairs by
+        # ContextManager.append_messages(), so `len(all_messages)` is even
+        # and each "turn" = exactly 2 consecutive messages.
         k_messages = cfg.immediate_memory_turns * 2
+        # Ensure we never ask for more messages than are available.
+        k_messages = min(k_messages, len(all_messages))
         recent = all_messages[-k_messages:] if k_messages > 0 else []
 
         # Check token budget and trim further if needed.
@@ -168,7 +172,9 @@ class MemoryManager:
         if not self._should_compress(ctx, db):
             return
         # Fire and forget – errors are logged but not propagated.
-        asyncio.ensure_future(
+        # create_task is preferred over ensure_future so the task is properly
+        # tracked by the running event loop and can be cleanly cancelled on shutdown.
+        asyncio.create_task(
             self._do_compress(ctx, db, provider),
         )
 
@@ -268,7 +274,9 @@ class MemoryManager:
 
             # Messages already covered by the existing summary should not be
             # re-compressed; only process newly accumulated turns.
-            already_covered = ctx.summary_covers_turns * 2  # turns → messages
+            # Since messages are stored as alternating user/assistant pairs,
+            # summary_covers_turns * 2 gives the correct message index offset.
+            already_covered = ctx.summary_covers_turns * 2  # turns → message index
             messages_to_summarise = all_messages[already_covered:]
             if not messages_to_summarise:
                 return

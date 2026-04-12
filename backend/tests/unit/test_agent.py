@@ -610,7 +610,8 @@ class TestMemoryManagerEstimateTokens:
 
         mm = MemoryManager()
         msgs = [{"role": "user", "content": "你好"}]
-        # "你好" = 2 chars → 2/2.5 ≈ 0 + 10 overhead = 10
+        # "你好" = 2 chars → int(2/2.5) = 0 content tokens
+        # + 10-token per-message overhead → total ≥ 10
         result = mm.estimate_tokens(msgs)
         assert result > 0
 
