@@ -18,6 +18,7 @@ from app.agent.context import (
 from app.agent.context_manager import ContextManager
 from app.agent.document_pipeline import DocumentGenerationPipeline
 from app.agent.knowledge_extractor import KnowledgeExtractor
+from app.agent.memory_manager import MemoryManager
 from app.agent.phase_document_renderer import PhaseDocumentRenderer
 from app.agent.phase_engine import PhaseEngine
 from app.agent.prompt_builder import PromptBuilder
@@ -97,6 +98,7 @@ class AgentCore:
 
     def __init__(self) -> None:
         self._context_manager = ContextManager()
+        self._memory_manager = MemoryManager()
         self._phase_engine = PhaseEngine()
         self._prompt_builder = PromptBuilder()
         self._knowledge_extractor = KnowledgeExtractor()
@@ -123,11 +125,12 @@ class AgentCore:
             phase_transition_reason = f"auto: {ctx.current_phase.value} → {new_phase.value}"
             self._phase_engine.advance_phase(ctx, new_phase, phase_transition_reason)
 
-        # 3. Build system prompt
-        system_prompt = self._prompt_builder.build(ctx)
+        # 3. Build system prompt (with optional rolling summary – Layer 2)
+        summary_block = self._memory_manager.get_summary_block(ctx)
+        system_prompt = self._prompt_builder.build(ctx, memory_summary_block=summary_block)
 
-        # 4. Call AI (pass full conversation history from DB + current message)
-        history = await self._context_manager.load_messages(session_id, db)
+        # 4. Call AI – pass Layer-1 immediate history + current message
+        history = await self._memory_manager.get_messages_for_ai(ctx, db)
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(history)
         messages.append({"role": "user", "content": message})
@@ -163,7 +166,11 @@ class AgentCore:
         await self._context_manager.save(ctx, db)
         await self._context_manager.append_messages(session_id, message, ai_reply, db)
 
-        # 10. Build response
+        # 10. Trigger async memory compression if threshold reached (Layer 2).
+        #     This is fire-and-forget; failures are logged but never propagate.
+        await self._memory_manager.maybe_compress(ctx, db, provider=provider)
+
+        # 11. Build response
         return AgentResponse(
             reply=ai_reply,
             session_id=session_id,

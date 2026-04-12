@@ -152,6 +152,37 @@ class ClarificationQuestion(BaseModel):
     answered: bool = False
 
 
+class MemoryConfig(BaseModel):
+    """Tunable parameters for the three-layer memory model."""
+
+    immediate_memory_turns: int = Field(
+        default=10,
+        description="K – keep the most recent K turns verbatim in the messages list.",
+    )
+    min_immediate_memory_turns: int = Field(
+        default=2,
+        description=(
+            "Hard floor for K when the token budget forces trimming; "
+            "always keep at least this many recent turns."
+        ),
+    )
+    summary_trigger_turns: int = Field(
+        default=10,
+        description="First-fire: start compression once turn_count reaches this value.",
+    )
+    summary_refresh_interval: int = Field(
+        default=5,
+        description=(
+            "After the first compression, refresh the rolling summary every M turns "
+            "(i.e. at turns 10, 15, 20, …)."
+        ),
+    )
+    max_input_tokens: int = Field(
+        default=6000,
+        description="Soft token budget for the full input sent to the AI provider.",
+    )
+
+
 class AgentContext(BaseModel):
     session_id: str
     project_id: Optional[str] = None
@@ -163,6 +194,24 @@ class AgentContext(BaseModel):
     generated_documents: List[DocumentRef] = Field(default_factory=list)
     clarification_queue: List[ClarificationQuestion] = Field(default_factory=list)
     turn_count: int = 0
+
+    # ── Memory mechanism fields (§4.4 of ai-agent-design.md) ──────────────
+    conversation_summary: str = Field(
+        default="",
+        description=(
+            "Layer 2 rolling summary: AI-generated compression of turns older than "
+            "the immediate-memory window.  Empty until the first compression fires."
+        ),
+    )
+    summary_last_updated_turn: int = Field(
+        default=0,
+        description="turn_count at which conversation_summary was last updated.",
+    )
+    summary_covers_turns: int = Field(
+        default=0,
+        description="Number of turns already covered by conversation_summary.",
+    )
+    memory_config: MemoryConfig = Field(default_factory=MemoryConfig)
 
     def get_stale_documents(self) -> List[str]:
         return [

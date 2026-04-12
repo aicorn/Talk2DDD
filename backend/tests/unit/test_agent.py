@@ -589,3 +589,210 @@ class TestContextManagerHistory:
         await cm.append_messages("bad-uuid", "msg", "reply", db)
 
         db.add.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# MemoryManager
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryManagerEstimateTokens:
+    """Deterministic tests – no I/O."""
+
+    def test_empty_list_returns_zero(self):
+        from app.agent.memory_manager import MemoryManager
+
+        mm = MemoryManager()
+        assert mm.estimate_tokens([]) == 0
+
+    def test_single_short_message(self):
+        from app.agent.memory_manager import MemoryManager
+
+        mm = MemoryManager()
+        msgs = [{"role": "user", "content": "你好"}]
+        # "你好" = 2 chars → 2/2.5 ≈ 0 + 10 overhead = 10
+        result = mm.estimate_tokens(msgs)
+        assert result > 0
+
+    def test_longer_content_gives_larger_estimate(self):
+        from app.agent.memory_manager import MemoryManager
+
+        mm = MemoryManager()
+        short = [{"role": "user", "content": "短消息"}]
+        long = [{"role": "user", "content": "这是一条非常长的消息，包含了大量的文字内容，用来测试估算是否随内容增长而增大"}]
+        assert mm.estimate_tokens(long) > mm.estimate_tokens(short)
+
+    def test_multiple_messages_accumulate(self):
+        from app.agent.memory_manager import MemoryManager
+
+        mm = MemoryManager()
+        one = [{"role": "user", "content": "你好"}]
+        two = [{"role": "user", "content": "你好"}, {"role": "assistant", "content": "嗨"}]
+        assert mm.estimate_tokens(two) > mm.estimate_tokens(one)
+
+
+class TestMemoryManagerGetSummaryBlock:
+    """Tests for the summary block helper – no I/O."""
+
+    def test_empty_summary_returns_empty_string(self):
+        from app.agent.memory_manager import MemoryManager
+
+        mm = MemoryManager()
+        ctx = make_context()
+        assert mm.get_summary_block(ctx) == ""
+
+    def test_non_empty_summary_returns_wrapped_block(self):
+        from app.agent.memory_manager import MemoryManager
+
+        mm = MemoryManager()
+        ctx = make_context()
+        ctx.conversation_summary = "用户想做个人博客网站，技术选型 Next.js"
+        block = mm.get_summary_block(ctx)
+        assert "[MEMORY_SUMMARY]" in block
+        assert "[/MEMORY_SUMMARY]" in block
+        assert "用户想做个人博客网站" in block
+
+
+class TestMemoryManagerShouldCompress:
+    """Tests for the private _should_compress logic – no I/O."""
+
+    def test_no_compression_before_trigger_turns(self):
+        from app.agent.memory_manager import MemoryManager
+        from unittest.mock import AsyncMock
+
+        mm = MemoryManager()
+        ctx = make_context()
+        ctx.turn_count = 5  # below default trigger of 10
+        db = AsyncMock()
+        assert mm._should_compress(ctx, db) is False
+
+    def test_first_compression_fires_at_trigger_turns(self):
+        from app.agent.memory_manager import MemoryManager
+        from unittest.mock import AsyncMock
+
+        mm = MemoryManager()
+        ctx = make_context()
+        ctx.turn_count = 10  # equals default trigger
+        ctx.summary_last_updated_turn = 0
+        db = AsyncMock()
+        assert mm._should_compress(ctx, db) is True
+
+    def test_no_duplicate_first_fire_when_already_updated(self):
+        from app.agent.memory_manager import MemoryManager
+        from unittest.mock import AsyncMock
+
+        mm = MemoryManager()
+        ctx = make_context()
+        ctx.turn_count = 10
+        ctx.summary_last_updated_turn = 10  # already fired
+        db = AsyncMock()
+        # Neither first-fire nor periodic (delta = 0, < interval 5)
+        assert mm._should_compress(ctx, db) is False
+
+    def test_periodic_refresh_fires_after_interval(self):
+        from app.agent.memory_manager import MemoryManager
+        from unittest.mock import AsyncMock
+
+        mm = MemoryManager()
+        ctx = make_context()
+        ctx.turn_count = 15
+        ctx.summary_last_updated_turn = 10  # first fire already happened
+        db = AsyncMock()
+        # delta = 5 == refresh_interval (default 5) → should fire
+        assert mm._should_compress(ctx, db) is True
+
+    def test_periodic_refresh_does_not_fire_between_intervals(self):
+        from app.agent.memory_manager import MemoryManager
+        from unittest.mock import AsyncMock
+
+        mm = MemoryManager()
+        ctx = make_context()
+        ctx.turn_count = 13
+        ctx.summary_last_updated_turn = 10
+        db = AsyncMock()
+        # delta = 3 < interval 5 → should NOT fire
+        assert mm._should_compress(ctx, db) is False
+
+
+class TestMemoryManagerGetMessagesForAI:
+    """Tests for get_messages_for_ai – DB is mocked."""
+
+    @pytest.mark.asyncio
+    async def test_returns_most_recent_k_turns(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from app.agent.memory_manager import MemoryManager
+
+        mm = MemoryManager()
+        ctx = make_context()
+        # K=10 turns → at most 20 messages
+
+        # Build 30 fake messages (15 turns)
+        fake_messages = [
+            _FakeMessage("user" if i % 2 == 0 else "assistant", f"msg{i}")
+            for i in range(30)
+        ]
+        fake_convo = _FakeConversation(fake_messages)
+
+        db = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = fake_convo
+        db.execute = AsyncMock(return_value=mock_result)
+
+        result = await mm.get_messages_for_ai(ctx, db)
+
+        # Default K=10 → max 20 messages; we have 30, so trim to last 20
+        assert len(result) == 20
+        # Last message should be the last fake message
+        assert result[-1]["content"] == "msg29"
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_no_history(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from app.agent.memory_manager import MemoryManager
+
+        mm = MemoryManager()
+        ctx = make_context()
+
+        db = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+        db.execute = AsyncMock(return_value=mock_result)
+
+        result = await mm.get_messages_for_ai(ctx, db)
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_trims_further_when_over_token_budget(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from app.agent.memory_manager import MemoryManager
+        from app.agent.context import MemoryConfig
+
+        mm = MemoryManager()
+        ctx = make_context()
+        # Set a very small token budget to force trimming
+        ctx.memory_config = MemoryConfig(
+            immediate_memory_turns=10,
+            min_immediate_memory_turns=2,
+            max_input_tokens=100,  # tiny budget
+        )
+
+        # Build 20 messages with large content (each ~200 chars → many tokens)
+        long_content = "这是非常长的消息内容" * 20  # 180 chars
+        fake_messages = [
+            _FakeMessage("user" if i % 2 == 0 else "assistant", long_content)
+            for i in range(20)
+        ]
+        fake_convo = _FakeConversation(fake_messages)
+
+        db = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = fake_convo
+        db.execute = AsyncMock(return_value=mock_result)
+
+        result = await mm.get_messages_for_ai(ctx, db)
+
+        # Should have been trimmed to at least min_immediate_memory_turns * 2 = 4
+        assert len(result) <= 20
+        # Should keep at least min turns
+        assert len(result) >= ctx.memory_config.min_immediate_memory_turns * 2
+

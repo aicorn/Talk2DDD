@@ -141,13 +141,22 @@ _CHANGE_DETECTION_PHASES = {
 class PromptBuilder:
     """Assembles the layered system prompt for the current phase and context."""
 
-    def build(self, ctx: AgentContext) -> str:
-        """Return the full system prompt string for this request."""
+    def build(self, ctx: AgentContext, memory_summary_block: str = "") -> str:
+        """Return the full system prompt string for this request.
+
+        Args:
+            ctx: Current ``AgentContext``.
+            memory_summary_block: The ``[MEMORY_SUMMARY]…[/MEMORY_SUMMARY]``
+                block produced by ``MemoryManager.get_summary_block(ctx)``.
+                Pass an empty string (the default) if no summary is available
+                yet (early turns) – the layer will simply be omitted.
+        """
         layers = [
             _ROLE_DEFINITION,
             _PHASE_INSTRUCTIONS.get(ctx.current_phase, ""),
-            self._build_context_block(ctx),
-            _XML_EXTRACTION_FORMAT,
+            memory_summary_block,          # Layer 3 – rolling summary (optional)
+            self._build_context_block(ctx),  # Layer 4 – structured knowledge
+            _XML_EXTRACTION_FORMAT,         # Layers 5+6
         ]
         return "\n\n---\n\n".join(layer.strip() for layer in layers if layer.strip())
 
