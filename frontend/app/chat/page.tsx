@@ -115,9 +115,11 @@ export default function ChatPage() {
   const router = useRouter()
   const [provider] = useState<Provider>(getStoredProvider)
   const [sessionId] = useState<string>(() => getSessionIdFromUrl() ?? generateSessionId())
+  const [isResume] = useState<boolean>(() => getSessionIdFromUrl() !== null)
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
+  const [restoring, setRestoring] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [lastFailedMessage, setLastFailedMessage] = useState<string | null>(null)
   // Agent state
@@ -134,6 +136,71 @@ export default function ChatPage() {
       router.push('/login')
     }
   }, [router])
+
+  // When resuming an existing session, restore messages + phase state + phase document
+  useEffect(() => {
+    if (!isResume) return
+    async function restoreSession() {
+      setRestoring(true)
+      try {
+        const headers = { ...getAuthHeaders() }
+
+        // 1. Load message history
+        const msgsRes = await fetch(
+          `${API_URL}/api/v1/agent/sessions/${sessionId}/messages`,
+          { headers }
+        )
+        if (msgsRes.ok) {
+          const msgsData = await msgsRes.json()
+          setMessages(
+            (msgsData.messages ?? []).map(
+              (m: { role: string; content: string }) => ({
+                role: m.role as 'user' | 'assistant',
+                content: m.content,
+              })
+            )
+          )
+        }
+
+        // 2. Load context (phase + progress)
+        const ctxRes = await fetch(
+          `${API_URL}/api/v1/agent/context/${sessionId}`,
+          { headers }
+        )
+        if (ctxRes.ok) {
+          const ctxData = await ctxRes.json()
+          const currentPhase: string = ctxData.current_phase ?? 'ICEBREAK'
+          setPhase(currentPhase)
+          setProgress(ctxData.progress ?? 0)
+
+          // 3. Load the phase document for the current phase
+          const pdRes = await fetch(
+            `${API_URL}/api/v1/agent/phase-document/${sessionId}/${currentPhase}`,
+            { headers }
+          )
+          if (pdRes.ok) {
+            const pdData = await pdRes.json()
+            if (pdData.content) {
+              setPhaseDocument({
+                phase: pdData.phase,
+                title: pdData.title,
+                content: pdData.content,
+                rendered_at: pdData.rendered_at,
+                turn_count: pdData.turn_count,
+              })
+              setShowPhaseDoc(true)
+            }
+          }
+        }
+      } catch {
+        // Non-critical: silently ignore restore errors
+      } finally {
+        setRestoring(false)
+      }
+    }
+    restoreSession()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   async function sendMessage(overrideText?: string) {
     const trimmed = (overrideText ?? input).trim()
@@ -264,7 +331,10 @@ export default function ChatPage() {
             className="flex-1 overflow-y-auto border rounded-lg p-4 mb-3 space-y-3 bg-gray-50"
             aria-label="chat history"
           >
-            {messages.length === 0 && (
+            {restoring && (
+              <p className="text-gray-400 text-sm text-center mt-8">正在恢复对话历史…</p>
+            )}
+            {!restoring && messages.length === 0 && (
               <p className="text-gray-400 text-sm text-center mt-8">发送消息开始对话 ✨</p>
             )}
             {messages.map((msg, i) => (

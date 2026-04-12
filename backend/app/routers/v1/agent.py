@@ -30,6 +30,8 @@ from app.schemas.agent import (
     PhaseDocumentSchema,
     RequirementChangeSummary,
     RequirementChangesResponse,
+    SessionMessageItem,
+    SessionMessagesResponse,
 )
 
 import uuid as _uuid
@@ -341,6 +343,55 @@ async def list_sessions(
         )
 
     return ConversationListResponse(conversations=items)
+
+
+# ---------------------------------------------------------------------------
+# GET /sessions/{session_id}/messages
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/sessions/{session_id}/messages",
+    response_model=SessionMessagesResponse,
+    status_code=200,
+)
+async def get_session_messages(
+    session_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> SessionMessagesResponse:
+    """Return all stored user/assistant messages for a session."""
+    from sqlalchemy import select
+
+    try:
+        conv_uuid = _uuid.UUID(session_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid session_id: not a valid UUID",
+        )
+
+    result = await db.execute(
+        select(Conversation).where(
+            Conversation.id == conv_uuid,
+            Conversation.user_id == current_user.id,
+        )
+    )
+    conv = result.scalar_one_or_none()
+    if conv is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found",
+        )
+
+    msgs = await _context_manager.load_messages(session_id, db)
+    return SessionMessagesResponse(
+        session_id=session_id,
+        messages=[
+            SessionMessageItem(role=m["role"], content=m["content"])
+            for m in msgs
+        ],
+    )
 
 
 # ---------------------------------------------------------------------------

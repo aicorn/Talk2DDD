@@ -182,13 +182,6 @@ export default function DashboardPage() {
             <section className="mt-10" aria-label="session history">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-lg font-semibold text-gray-700">历史对话</h3>
-                <a
-                  href="/chat"
-                  className="px-4 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-                  aria-label="new session"
-                >
-                  + 新对话
-                </a>
               </div>
 
               {sessionsLoading && (
@@ -196,7 +189,7 @@ export default function DashboardPage() {
               )}
 
               {!sessionsLoading && sessions.length === 0 && (
-                <p className="text-gray-400 text-sm">暂无历史对话，点击「新对话」开始。</p>
+                <p className="text-gray-400 text-sm">暂无历史对话，点击上方「AI 对话」开始。</p>
               )}
 
               {!sessionsLoading && sessions.length > 0 && (

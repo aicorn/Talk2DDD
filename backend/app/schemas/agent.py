@@ -110,3 +110,13 @@ class ConversationSummary(BaseModel):
 
 class ConversationListResponse(BaseModel):
     conversations: List[ConversationSummary]
+
+
+class SessionMessageItem(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
+class SessionMessagesResponse(BaseModel):
+    session_id: str
+    messages: List[SessionMessageItem]

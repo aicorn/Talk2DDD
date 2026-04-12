@@ -214,11 +214,11 @@ describe('DashboardPage', () => {
     })
   })
 
-  it('renders a new session button linking to /chat', async () => {
+  it('renders AI chat link in quick actions linking to /chat', async () => {
     mockFetchUserAndSessions()
     render(<DashboardPage />)
     await waitFor(() => {
-      expect(screen.getByLabelText('new session')).toHaveAttribute('href', '/chat')
+      expect(screen.getByLabelText('go to chat')).toHaveAttribute('href', '/chat')
     })
   })
 })
