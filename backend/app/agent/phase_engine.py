@@ -11,31 +11,6 @@ from app.agent.context import (
     PHASE_ORDER,
 )
 
-# Phases where requirement-change rollback is allowed
-_ROLLBACK_ENABLED_PHASES = {
-    Phase.DOMAIN_EXPLORE,
-    Phase.MODEL_DESIGN,
-    Phase.DOC_GENERATE,
-    Phase.REVIEW_REFINE,
-}
-
-# Chinese keywords that signal a requirement change
-_CHANGE_SIGNALS = [
-    "还有一个需求",
-    "另外",
-    "补充一点",
-    "之前说的",
-    "其实",
-    "改一下",
-    "调整一下",
-    "变成了",
-    "取消",
-    "砍掉",
-    "不需要了",
-    "去掉",
-    "/change",
-]
-
 
 class PhaseEngine:
     """Evaluates and applies phase transitions for an AgentContext."""
@@ -44,7 +19,8 @@ class PhaseEngine:
         """Check whether a phase transition should occur.
 
         Returns the target Phase if a transition is warranted, else None.
-        Side-effect: sets ctx.phase_before_change on rollback.
+        Only explicit slash commands trigger a phase change — all other
+        phase navigation is handled via the UI buttons (switch_phase).
         """
         msg_lower = user_message.lower()
 
@@ -68,12 +44,6 @@ class PhaseEngine:
             ctx.tech_stack_preferences.skipped = False
             # Jump to MODEL_DESIGN so the tech stack instructions are active
             return Phase.MODEL_DESIGN
-
-        # Requirement-change rollback (P3–P6 only)
-        if ctx.current_phase in _ROLLBACK_ENABLED_PHASES:
-            if any(signal in user_message for signal in _CHANGE_SIGNALS):
-                ctx.phase_before_change = ctx.current_phase
-                return Phase.REQUIREMENT
 
         return None
 
