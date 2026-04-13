@@ -85,6 +85,18 @@ const DOC_TYPE_LABELS: Record<string, string> = {
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? ''
 const THINK_PREVIEW_LEN = 60
 
+/**
+ * Checks whether a failed API response is an authentication error (401/403).
+ * Returns the error message to throw, or null if it's not auth-related.
+ */
+function parseApiError(res: Response, body: { detail?: string }): string {
+  if (res.status === 401 || res.status === 403) {
+    // Return a sentinel that callers can recognise
+    return '__AUTH_ERROR__'
+  }
+  return body.detail ?? `HTTP ${res.status}`
+}
+
 function getStoredProvider(): Provider {
   if (typeof window === 'undefined') return 'openai'
   const stored = window.localStorage.getItem('ai_provider')
@@ -316,7 +328,7 @@ export default function ChatPage() {
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
-        throw new Error(data.detail ?? `HTTP ${res.status}`)
+        throw new Error(parseApiError(res, data))
       }
 
       const data: AgentChatResponse = await res.json()
@@ -340,7 +352,12 @@ export default function ChatPage() {
         setShowPhaseDoc(true)
       }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : '发生未知错误，请重试')
+      const msg = err instanceof Error ? err.message : '发生未知错误，请重试'
+      if (msg === '__AUTH_ERROR__') {
+        router.push('/login')
+        return
+      }
+      setError(msg)
       setLastFailedMessage(trimmed)
     } finally {
       setLoading(false)
@@ -388,7 +405,7 @@ export default function ChatPage() {
       })
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
-        throw new Error(data.detail ?? `HTTP ${res.status}`)
+        throw new Error(parseApiError(res, data))
       }
       const data = await res.json()
       const label = DOC_TYPE_LABELS[documentType] ?? documentType
@@ -412,7 +429,12 @@ export default function ChatPage() {
       // Remove this doc type from the pending list
       setPendingDocuments((prev) => prev.filter((t) => t !== documentType))
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : '文档生成失败，请重试')
+      const msg = err instanceof Error ? err.message : '文档生成失败，请重试'
+      if (msg === '__AUTH_ERROR__') {
+        router.push('/login')
+        return
+      }
+      setError(msg)
     } finally {
       setGeneratingDoc(null)
     }
@@ -435,7 +457,7 @@ export default function ChatPage() {
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
-        throw new Error(data.detail ?? `HTTP ${res.status}`)
+        throw new Error(parseApiError(res, data))
       }
 
       const data: AgentChatResponse = await res.json()
@@ -468,7 +490,12 @@ export default function ChatPage() {
         setShowPhaseDoc(true)
       }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : '阶段切换失败，请重试')
+      const msg = err instanceof Error ? err.message : '阶段切换失败，请重试'
+      if (msg === '__AUTH_ERROR__') {
+        router.push('/login')
+        return
+      }
+      setError(msg)
     } finally {
       setPhaseChanging(false)
     }

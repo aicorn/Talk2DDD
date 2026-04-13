@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     # JWT Authentication
     SECRET_KEY: str = "change-this-secret-key-in-production-minimum-32-chars"
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 480  # 8 hours — long enough for a working session
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     # AI Provider selection: "openai", "deepseek", or "minimax"
