@@ -45,6 +45,7 @@ class DocumentVersion(BaseModel):
     document_type: Mapped[str] = mapped_column(String(100), default="requirements", nullable=False)
     extra_data: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     is_current: Mapped[bool] = mapped_column(default=True, nullable=False)
+    staleness_status: Mapped[str] = mapped_column(String(20), default="CURRENT", nullable=False)
 
     # Relationships
     project: Mapped["Project"] = relationship("Project", back_populates="document_versions")

@@ -42,6 +42,13 @@
 │                    │  └─────┬──────┘  └──────────────────────┘   │  │
 │                    │        │                                     │  │
 │                    │  ┌─────▼──────────────────────────────────┐ │  │
+│                    │  │         记忆管理器 (MemoryManager)  ← 新  │ │  │
+│                    │  │  • 即时记忆：最近 K 轮原文              │ │  │
+│                    │  │  • 滚动摘要：AI 压缩旧轮次对话          │ │  │
+│                    │  │  • 结构化记忆：DomainKnowledge 注入     │ │  │
+│                    │  └─────┬──────────────────────────────────┘ │  │
+│                    │        │                                     │  │
+│                    │  ┌─────▼──────────────────────────────────┐ │  │
 │                    │  │         工具调度器 (ToolDispatcher)      │ │  │
 │                    │  │  • extract_domain_concepts              │ │  │
 │                    │  │  • generate_document                    │ │  │
@@ -190,6 +197,221 @@ HTTP 请求 (含 session_id)
 
 ---
 
+### 4.4 记忆机制（MemoryManager）
+
+#### 4.4.1 设计动机
+
+LLM 具有固定的上下文窗口（Context Window），随着对话轮次增加，若将全部历史消息逐字传给 AI，会导致：
+
+1. **Token 超限** — 消息总量超出 Provider 的 `max_tokens` 限制，请求直接报错。
+2. **上下文稀释** — 大量早期消息"稀释"了近期关键信息（如项目名称、核心需求），AI 更关注最近的内容而"遗忘"更早的信息。
+3. **费用增加** — 输入 Token 越多，API 费用越高；长期会话成本不可控。
+
+> 上述问题即为用户反馈"只聊几轮就忘记了项目是什么"的根本原因。
+
+解决方案是引入 **MemoryManager** 组件，实现三层记忆模型，在保留关键信息的同时压缩上下文体积。
+
+---
+
+#### 4.4.2 三层记忆模型
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                       三层记忆模型                               │
+├───────────────┬─────────────────────────────────────────────────┤
+│ Layer 1       │ 即时记忆（Immediate Memory）                      │
+│ 最近 K 轮     │ 原文保留，逐字传入 messages 列表                   │
+│ （默认 K=10） │ 保证 AI 完整感知最近对话上下文                      │
+├───────────────┼─────────────────────────────────────────────────┤
+│ Layer 2       │ 滚动摘要（Rolling Summary）                       │
+│ 第 1～N-K 轮  │ 由 AI 压缩为 200~400 字的结构化摘要               │
+│               │ 注入到 System Prompt 的 [MEMORY_SUMMARY] 区块    │
+│               │ 每 M 轮（默认 M=5）或当 token 超阈值时重新压缩     │
+├───────────────┼─────────────────────────────────────────────────┤
+│ Layer 3       │ 结构化长期记忆（Structured Knowledge）            │
+│ 全会话        │ AgentContext.domain_knowledge 中的领域知识        │
+│               │ 以 JSON 结构化存储，始终完整注入 [CONTEXT_BLOCK]  │
+│               │ 天然压缩：无论对话多长，token 占用固定且精简        │
+└───────────────┴─────────────────────────────────────────────────┘
+```
+
+三层配合形成**完整记忆**：
+
+```
+System Prompt
+  ├── [MEMORY_SUMMARY]  ← Layer 2：旧轮次摘要（动态）
+  ├── [CONTEXT_BLOCK]   ← Layer 3：结构化领域知识（动态）
+  └── 阶段指令 + 格式约束
+
+Messages 列表
+  ├── 最近 K 轮 user/assistant 消息  ← Layer 1（动态）
+  └── 当前 user 消息
+```
+
+---
+
+#### 4.4.3 压缩触发条件与算法
+
+**触发条件**（满足任一即触发）：
+
+| 条件 | 说明 | 默认阈值 |
+|------|------|----------|
+| 首次触发 | `turn_count >= SUMMARY_TRIGGER_TURNS`，首次启动压缩 | 10 轮 |
+| Token 超预算 | 预估输入 token 超过 `MAX_INPUT_TOKENS` | 6000 tokens |
+| 定期刷新 | 首次触发后，每满 `SUMMARY_REFRESH_INTERVAL` 轮增量刷新摘要 | 每 5 轮（即第 10、15、20 轮…） |
+
+> **说明**：`SUMMARY_REFRESH_INTERVAL`（默认 5）是在首次触发（第 10 轮）之后的增量刷新频率，而非从第 1 轮开始计算。两个参数不冲突：前者控制"何时开始"，后者控制"之后多久刷新一次"。
+
+**压缩算法**（逐步累积式）：
+
+```
+function compress_memory(history, existing_summary):
+    # 待压缩消息 = 超过 K 轮的所有旧消息
+    old_messages = history[:-K]
+
+    # 构造压缩提示
+    prompt = f"""
+    你是记忆压缩助手。请将以下对话历史与已有摘要合并，
+    生成一份不超过 400 字的结构化摘要，重点保留：
+    1. 用户的项目名称和业务背景
+    2. 已确认的核心需求和业务场景
+    3. 用户的决策和偏好
+    4. 尚未解决的问题或待澄清事项
+
+    已有摘要：{existing_summary}
+    新增对话：{old_messages}
+    """
+
+    # 调用轻量 AI 模型生成摘要（如 gpt-4o-mini）
+    new_summary = ai_service.chat_completion(
+        messages=[{"role": "user", "content": prompt}],
+        model="summary",  # 可配置单独的摘要模型
+    )
+
+    return new_summary
+```
+
+**关键设计决策**：
+- 采用**累积式摘要**（新摘要 = 旧摘要 + 新增消息）而非全量重压缩，减少 AI 调用量。
+- 压缩操作**异步执行**，不阻塞主对话响应；若压缩未完成，降级为仅使用结构化记忆（Layer 3）。
+- 摘要单独存储在 `AgentContext.conversation_summary` 字段，与 `domain_knowledge` 分离。
+
+---
+
+#### 4.4.4 AgentContext 数据结构扩展
+
+在现有 `AgentContext` 中新增以下字段：
+
+```
+AgentContext
+├── ...（现有字段不变）
+│
+├── conversation_summary: str         # Layer 2：当前的滚动对话摘要（AI 生成）
+│                                      # 初始为空；首次压缩后更新
+├── summary_last_updated_turn: int    # 最后一次更新摘要时的 turn_count
+├── summary_covers_turns: int         # 摘要已覆盖的历史轮次数（用于判断是否需要刷新）
+│
+└── memory_config: MemoryConfig       # 记忆参数配置
+    ├── immediate_memory_turns: int   # K 值（保留最近 K 轮原文），默认 10
+    ├── min_immediate_memory_turns: int # K 值下限（token 超预算时自动缩减 K，但不低于此值），默认 2
+    ├── summary_trigger_turns: int    # 首次压缩阈值（turn_count >= 此值时触发），默认 10
+    ├── summary_refresh_interval: int # 首次压缩后每隔 M 轮增量刷新摘要，默认 5
+    └── max_input_tokens: int         # 输入 token 预算，默认 6000
+```
+
+---
+
+#### 4.4.5 MemoryManager 接口设计
+
+```python
+class MemoryManager:
+    """管理 Agent 对话记忆的三层模型。"""
+
+    async def get_messages_for_ai(
+        self,
+        ctx: AgentContext,
+        db: AsyncSession,
+    ) -> list[dict]:
+        """
+        返回应传给 AI Provider 的完整消息列表（Layer 1）。
+        - 从 Message 表加载该 session 的全部历史消息
+        - 仅返回最近 K 轮（immediate_memory_turns）的 user/assistant 消息
+        - 确保不超过 max_input_tokens token 预算
+        """
+
+    async def get_summary_block(self, ctx: AgentContext) -> str:
+        """
+        返回 [MEMORY_SUMMARY] 区块内容（Layer 2）。
+        - 若 conversation_summary 不为空，返回其内容
+        - 若为空，返回 ""（PromptBuilder 将跳过该区块）
+        """
+
+    async def maybe_compress(
+        self,
+        ctx: AgentContext,
+        db: AsyncSession,
+        provider: str | None = None,
+    ) -> None:
+        """
+        检查是否需要压缩记忆，若需要则异步执行压缩。
+        - 更新 ctx.conversation_summary
+        - 更新 ctx.summary_last_updated_turn
+        - 不阻塞主对话；压缩失败时静默降级
+        """
+
+    def estimate_tokens(self, messages: list[dict]) -> int:
+        """
+        粗估消息列表的 token 数（按每字符 ~0.4 token 估算，
+        无需引入 tiktoken 等额外依赖）。
+        """
+```
+
+---
+
+#### 4.4.6 与 PromptBuilder 的集成
+
+`PromptBuilder.build()` 在组装 System Prompt 时需调用 `MemoryManager.get_summary_block()`，将摘要插入新的 Layer 3（原 Layer 3 上下文块改为 Layer 4）：
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│ Layer 1: 角色定义（固定）                                        │
+├────────────────────────────────────────────────────────────────┤
+│ Layer 2: 当前阶段指令（按阶段切换）                               │
+├────────────────────────────────────────────────────────────────┤
+│ Layer 3: 对话记忆摘要（动态，可选）          ← 新增              │
+│   "[MEMORY_SUMMARY]                                            │
+│    项目背景：用户想做一个个人博客网站…                            │
+│    已确认需求：仅作者可发布，读者可评论…                          │
+│    [/MEMORY_SUMMARY]"                                          │
+├────────────────────────────────────────────────────────────────┤
+│ Layer 4: 已积累的领域上下文（动态注入）                           │
+│   "[CONTEXT_BLOCK] ... [/CONTEXT_BLOCK]"                       │
+├────────────────────────────────────────────────────────────────┤
+│ Layer 5: 工具调用格式说明（可选，按需开启）                        │
+├────────────────────────────────────────────────────────────────┤
+│ Layer 6: 输出格式约束（按阶段）                                   │
+└────────────────────────────────────────────────────────────────┘
+```
+
+> **注意**：`[MEMORY_SUMMARY]` 区块仅在 `conversation_summary` 非空时插入，避免早期轮次引入无意义的空块。
+
+---
+
+#### 4.4.7 Token 预算管理
+
+为确保不超过 Provider 的上下文窗口限制，MemoryManager 按以下优先级裁剪：
+
+```
+总 token 预算 (MAX_INPUT_TOKENS = 6000)
+  ├── 系统提示 System Prompt              ~1200 tokens（固定）
+  ├── [MEMORY_SUMMARY] 摘要区块           ~200  tokens（有则包含）
+  ├── [CONTEXT_BLOCK] 结构化上下文        ~400  tokens（有则包含）
+  └── 消息历史 Layer 1                    剩余预算 / 自动裁剪
+        若剩余 < 即时消息所需，则减少 K 值（最少保留 2 轮）
+```
+
+---
+
 ## 5. 提示构建器（PromptBuilder）
 
 ### 5.1 System Prompt 分层结构
@@ -202,16 +424,23 @@ HTTP 请求 (含 session_id)
 │ Layer 2: 当前阶段指令（按阶段切换）                               │
 │   "当前处于「需求收集」阶段，你的任务是..."                        │
 ├────────────────────────────────────────────────────────────────┤
-│ Layer 3: 已积累的领域上下文（动态注入）                           │
+│ Layer 3: 对话记忆摘要（动态，可选）— 由 MemoryManager 提供        │
+│   "[MEMORY_SUMMARY] 项目背景：... 已确认需求：...                │
+│    [/MEMORY_SUMMARY]"                                          │
+│   注：仅在 conversation_summary 非空时插入（见 §4.4.6）          │
+├────────────────────────────────────────────────────────────────┤
+│ Layer 4: 已积累的领域上下文（动态注入）                           │
 │   "[CONTEXT_BLOCK] ... [/CONTEXT_BLOCK]"                       │
 ├────────────────────────────────────────────────────────────────┤
-│ Layer 4: 工具调用格式说明（可选，按需开启）                        │
+│ Layer 5: 工具调用格式说明（可选，按需开启）                        │
 │   "当识别出新领域概念时，调用 extract_domain_concepts 工具..."    │
 ├────────────────────────────────────────────────────────────────┤
-│ Layer 5: 输出格式约束（按阶段）                                   │
+│ Layer 6: 输出格式约束（按阶段）                                   │
 │   "每次回复末尾必须包含 [NEXT_QUESTION] 标记..."                  │
 └────────────────────────────────────────────────────────────────┘
 ```
+
+> **变更说明**：§4.4 中引入 MemoryManager 后，System Prompt 由原来的 5 层扩展为 6 层。Layer 3 新增对话记忆摘要区块 `[MEMORY_SUMMARY]`，原 Layer 3（领域上下文）顺移为 Layer 4，其余层依次后移。
 
 ### 5.2 各阶段 System Prompt 要点
 
@@ -593,7 +822,13 @@ PhaseDocument
                 (Redis / DB)
                         │
                         ▼
-              ② PhaseEngine.evaluate()
+              ② MemoryManager.get_messages_for_ai()   ← 记忆机制
+                从 Message 表加载历史消息
+                仅保留最近 K 轮（Layer 1 即时记忆）
+                超出预算时进一步裁剪
+                        │
+                        ▼
+              ③ PhaseEngine.evaluate()
                 判断当前阶段，检查退出条件
                         │
                   ┌─────┴─────┐
@@ -604,37 +839,44 @@ PhaseDocument
               advance_phase()  保持当前阶段
                         │
                         ▼
-              ③ PromptBuilder.build()
-                Layer1~5 拼装 System Prompt
+              ④ PromptBuilder.build()
+                Layer1~6 拼装 System Prompt
+                含 [MEMORY_SUMMARY]（Layer 3）← 记忆机制
                         │
                         ▼
-              ④ ai_service.chat_completion()
-                发送 [system + history + user] 给 AI Provider
+              ⑤ ai_service.chat_completion()
+                发送 [system + history(K轮) + user] 给 AI Provider
                         │
                         ▼
-              ⑤ KnowledgeExtractor.extract()
+              ⑥ KnowledgeExtractor.extract()
                 解析 AI 回复中的结构化标记
                         │
                         ▼
-              ⑥ ContextManager.merge()
+              ⑦ ContextManager.merge()
                 增量合并到 AgentContext
                         │
                         ▼
-              ⑦ ToolDispatcher.dispatch()
+              ⑧ ToolDispatcher.dispatch()
                 执行 AI 请求的工具调用（如有）
                         │
                         ▼
-              ⑧ PhaseDocumentRenderer.render()   ← 新增
+              ⑨ PhaseDocumentRenderer.render()
                 从 AgentContext 渲染当前阶段文档
                 （纯模板，无 AI 调用）
                         │
                         ▼
-              ⑨ 持久化 AgentContext + PhaseDocument
+              ⑩ 持久化 AgentContext + PhaseDocument
+                 + 追加本轮 user/assistant 消息到 Message 表
                         │
                         ▼
-              ⑩ 返回响应给前端
+              ⑪ MemoryManager.maybe_compress()（异步）← 记忆机制
+                 若满足压缩条件，后台调用 AI 生成滚动摘要
+                 更新 ctx.conversation_summary（下轮生效）
+                        │
+                        ▼
+              ⑫ 返回响应给前端
                 { reply, phase, suggestions, documents,
-                  phase_document }              ← 新增字段
+                  phase_document }
 ```
 
 ---
@@ -886,14 +1128,15 @@ PhaseDocument                     # 新增表，每轮对话后写入/覆盖
 | M3 | PhaseDocumentRenderer 六阶段模板 + PhaseDocument 持久化 | 🔴 高 |
 | M4 | 前端双栏布局：对话区 + 阶段文档面板（六阶段标签 + 自动刷新） | 🔴 高 |
 | M5 | KnowledgeExtractor（基于 XML 标记解析） | 🟡 中 |
-| M6 | ToolDispatcher + Function Calling 集成 | 🟡 中 |
-| M7 | DocumentGenerationPipeline 完整实现 | 🟡 中 |
-| M8 | 需求变更管理：record_requirement_change 工具 + STALE 标记 | 🟡 中 |
-| M9 | 需求变更冲突检测（概念重复、规则矛盾） | 🟡 中 |
-| M10 | 前端阶段进度条 + 概念面板 + 快捷建议 | 🟢 低 |
-| M11 | 前端 STALE 文档提示 + 需求变更时间轴 | 🟢 低 |
-| M12 | 斜线命令解析（含 `/change`, `/changes`, `/regenerate`） | 🟢 低 |
-| M13 | `validate_ddd_model` 工具（DDD 合规检查） | 🟢 低 |
+| M6 | **MemoryManager：三层记忆模型 + 滚动摘要压缩（见 §4.4）** | 🟡 中 |
+| M7 | ToolDispatcher + Function Calling 集成 | 🟡 中 |
+| M8 | DocumentGenerationPipeline 完整实现 | 🟡 中 |
+| M9 | 需求变更管理：record_requirement_change 工具 + STALE 标记 | 🟡 中 |
+| M10 | 需求变更冲突检测（概念重复、规则矛盾） | 🟡 中 |
+| M11 | 前端阶段进度条 + 概念面板 + 快捷建议 | 🟢 低 |
+| M12 | 前端 STALE 文档提示 + 需求变更时间轴 | 🟢 低 |
+| M13 | 斜线命令解析（含 `/change`, `/changes`, `/regenerate`） | 🟢 低 |
+| M14 | `validate_ddd_model` 工具（DDD 合规检查） | 🟢 低 |
 
 ---
 
@@ -914,12 +1157,26 @@ PhaseDocument                     # 新增表，每轮对话后写入/覆盖
 
 ### ADR-002：上下文压缩策略
 
-**问题**：对话轮次增多后，注入的历史上下文会超出 Token 限制。
+**问题**：对话轮次增多后，注入的历史上下文会超出 Token 限制，AI 开始"遗忘"早期信息（如项目名称、核心需求）。
 
-**决策**：采用"滚动摘要"策略：
-1. 保留最近 N 轮完整对话（N=10）。
-2. 更早的对话由 AI 总结为结构化摘要，注入为 System Prompt 的一部分。
-3. `DomainKnowledge` 始终以结构化 JSON 形式存储，而非原始对话文本，天然压缩。
+**决策**：采用三层记忆模型 + 滚动摘要策略（详见 §4.4）：
+1. **即时记忆**：保留最近 K 轮完整对话原文（默认 K=10）直接传给 AI。
+2. **滚动摘要**：第 1～N-K 轮的旧对话由 AI 压缩为 200~400 字的结构化摘要，注入为 System Prompt 的 `[MEMORY_SUMMARY]` 区块。
+3. **结构化长期记忆**：`DomainKnowledge` 始终以结构化 JSON 形式存储，而非原始对话文本，天然压缩，不受对话长度影响。
+
+**选择此方案而非其他方案的原因**：
+
+| 方案 | 优点 | 缺点 | 结论 |
+|------|------|------|------|
+| 全量历史（无压缩） | 实现最简单 | Token 超限，费用失控 | ❌ 不可持续 |
+| 固定窗口（仅保留最近 K 轮） | 简单，Token 可控 | 丢失早期关键信息（如项目名） | ⚠️ 短期可用，有风险 |
+| 滚动摘要 | 保留核心信息，Token 可控 | 需额外 AI 调用，摘要有信息损失 | ✅ 最优平衡 |
+| 外部向量检索（RAG） | 精准检索任意历史 | 架构复杂，引入向量 DB 依赖 | 🔮 未来演进 |
+
+**代价**：
+- 需维护 `MemoryManager` 组件和摘要 AI 调用逻辑。
+- 摘要生成引入额外延迟，通过**异步后台执行**缓解（下一轮才生效）。
+- 摘要本身有信息损失风险，通过`DomainKnowledge` 结构化备份核心信息。
 
 ---
 
@@ -975,3 +1232,20 @@ PhaseDocument                     # 新增表，每轮对话后写入/覆盖
 3. 两者分离，互不干扰：阶段文档随时可看，正式文档按需生成。
 
 **代价**：模板维护成本；阶段文档无法包含 AI 的洞察或建议（仅反映已提取的结构化数据）。
+
+---
+
+### ADR-006：记忆压缩的执行时机——同步 vs. 异步
+
+**问题**：记忆压缩（调用 AI 生成摘要）需要一次额外的 AI 调用（约 2~5 秒），执行时机有两个选择：在主对话响应前（同步）或主对话响应后（异步后台）。
+
+**决策**：**摘要压缩异步执行，当前轮次返回前不等待，下一轮次开始生效。**
+
+**原因**：
+1. 对话延迟是用户体验的核心指标；同步执行会使每隔 `SUMMARY_REFRESH_INTERVAL` 轮出现一次明显的响应延迟高峰。
+2. 摘要的"一轮延迟生效"对用户几乎无感知：压缩发生在第 N 轮之后，第 N+1 轮起即可使用新摘要；第 N 轮本身仍有 `[CONTEXT_BLOCK]` 结构化记忆兜底。
+3. 若异步压缩失败（如 AI 超时），静默降级——继续使用上一次成功的摘要或纯结构化记忆，不影响功能。
+
+**代价**：
+- 在极少情况下（高并发同一 session），异步摘要可能发生竞态写入；通过 `summary_last_updated_turn` 字段做乐观检查，只保留最新轮次的摘要。
+- 第一次压缩前的若干轮次（第 K+1～K+M 轮）无摘要保护；`DomainKnowledge` 结构化记忆作为兜底，保证核心信息不丢失。

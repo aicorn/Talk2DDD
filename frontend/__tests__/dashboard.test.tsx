@@ -17,6 +17,35 @@ jest.mock('../lib/auth', () => ({
 
 global.fetch = jest.fn()
 
+const USER_OK = { id: '1', email: 'test@example.com', username: 'testuser', is_active: true }
+const SESSIONS_OK = {
+  conversations: [
+    {
+      session_id: 'aaaaaaaa-0000-4000-8000-000000000001',
+      title: '博客系统对话',
+      phase: 'REQUIREMENT',
+      phase_label: '需求收集',
+      turn_count: 5,
+      updated_at: '2026-04-12T09:00:00Z',
+    },
+    {
+      session_id: 'bbbbbbbb-0000-4000-8000-000000000002',
+      title: null,
+      phase: 'ICEBREAK',
+      phase_label: '破冰引入',
+      turn_count: 1,
+      updated_at: '2026-04-11T08:00:00Z',
+    },
+  ],
+}
+
+/** Mock fetch: first call returns user info, second returns sessions list */
+function mockFetchUserAndSessions() {
+  ;(global.fetch as jest.Mock)
+    .mockResolvedValueOnce({ ok: true, json: async () => USER_OK })
+    .mockResolvedValueOnce({ ok: true, json: async () => SESSIONS_OK })
+}
+
 beforeEach(() => {
   jest.clearAllMocks()
 })
@@ -25,7 +54,7 @@ describe('DashboardPage', () => {
   it('renders the Talk2DDD heading', async () => {
     ;(global.fetch as jest.Mock).mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ id: '1', email: 'test@example.com', username: 'testuser', is_active: true }),
+      json: async () => USER_OK,
     })
     render(<DashboardPage />)
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Talk2DDD')
@@ -34,17 +63,14 @@ describe('DashboardPage', () => {
   it('shows loading state initially', () => {
     ;(global.fetch as jest.Mock).mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ id: '1', email: 'test@example.com', username: 'testuser', is_active: true }),
+      json: async () => USER_OK,
     })
     render(<DashboardPage />)
     expect(screen.getByLabelText('loading')).toBeInTheDocument()
   })
 
   it('renders welcome message with username after loading', async () => {
-    ;(global.fetch as jest.Mock).mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ id: '1', email: 'test@example.com', username: 'testuser', is_active: true }),
-    })
+    mockFetchUserAndSessions()
     render(<DashboardPage />)
     await waitFor(() => {
       expect(screen.getByText(/欢迎回来，testuser/)).toBeInTheDocument()
@@ -52,10 +78,7 @@ describe('DashboardPage', () => {
   })
 
   it('renders quick action cards', async () => {
-    ;(global.fetch as jest.Mock).mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ id: '1', email: 'test@example.com', username: 'testuser', is_active: true }),
-    })
+    mockFetchUserAndSessions()
     render(<DashboardPage />)
     await waitFor(() => {
       expect(screen.getByLabelText('go to chat')).toBeInTheDocument()
@@ -65,10 +88,7 @@ describe('DashboardPage', () => {
   })
 
   it('renders chat link pointing to /chat', async () => {
-    ;(global.fetch as jest.Mock).mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ id: '1', email: 'test@example.com', username: 'testuser', is_active: true }),
-    })
+    mockFetchUserAndSessions()
     render(<DashboardPage />)
     await waitFor(() => {
       expect(screen.getByLabelText('go to chat')).toHaveAttribute('href', '/chat')
@@ -78,7 +98,7 @@ describe('DashboardPage', () => {
   it('sends Authorization header with Bearer token from cookie', async () => {
     ;(global.fetch as jest.Mock).mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ id: '1', email: 'test@example.com', username: 'testuser', is_active: true }),
+      json: async () => USER_OK,
     })
     render(<DashboardPage />)
     await waitFor(() => {
@@ -130,7 +150,7 @@ describe('DashboardPage', () => {
   it('shows logout button', async () => {
     ;(global.fetch as jest.Mock).mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ id: '1', email: 'test@example.com', username: 'testuser', is_active: true }),
+      json: async () => USER_OK,
     })
     render(<DashboardPage />)
     expect(screen.getByLabelText('logout')).toBeInTheDocument()
@@ -139,10 +159,66 @@ describe('DashboardPage', () => {
   it('redirects to /login when logout is clicked', async () => {
     ;(global.fetch as jest.Mock).mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ id: '1', email: 'test@example.com', username: 'testuser', is_active: true }),
+      json: async () => USER_OK,
     })
     render(<DashboardPage />)
     fireEvent.click(screen.getByLabelText('logout'))
     expect(mockPush).toHaveBeenCalledWith('/login')
+  })
+
+  it('renders session history section after loading', async () => {
+    mockFetchUserAndSessions()
+    render(<DashboardPage />)
+    await waitFor(() => {
+      expect(screen.getByLabelText('session history')).toBeInTheDocument()
+    })
+  })
+
+  it('renders session list items with titles', async () => {
+    mockFetchUserAndSessions()
+    render(<DashboardPage />)
+    await waitFor(() => {
+      expect(screen.getByText('博客系统对话')).toBeInTheDocument()
+      // Second session has no title; falls back to default label
+      expect(screen.getByText('AI Agent 对话')).toBeInTheDocument()
+    })
+  })
+
+  it('renders a resume link for each session with correct href', async () => {
+    mockFetchUserAndSessions()
+    render(<DashboardPage />)
+    await waitFor(() => {
+      const resumeLink = screen.getByLabelText(
+        'resume session aaaaaaaa-0000-4000-8000-000000000001',
+      )
+      expect(resumeLink).toHaveAttribute(
+        'href',
+        '/chat?session=aaaaaaaa-0000-4000-8000-000000000001',
+      )
+    })
+  })
+
+  it('removes a session from the list when delete button is clicked', async () => {
+    mockFetchUserAndSessions()
+    ;(global.fetch as jest.Mock).mockResolvedValueOnce({ ok: true, json: async () => ({}) })
+
+    render(<DashboardPage />)
+    await waitFor(() => expect(screen.getByText('博客系统对话')).toBeInTheDocument())
+
+    fireEvent.click(
+      screen.getByLabelText('delete session aaaaaaaa-0000-4000-8000-000000000001'),
+    )
+
+    await waitFor(() => {
+      expect(screen.queryByText('博客系统对话')).not.toBeInTheDocument()
+    })
+  })
+
+  it('renders AI chat link in quick actions linking to /chat', async () => {
+    mockFetchUserAndSessions()
+    render(<DashboardPage />)
+    await waitFor(() => {
+      expect(screen.getByLabelText('go to chat')).toHaveAttribute('href', '/chat')
+    })
   })
 })

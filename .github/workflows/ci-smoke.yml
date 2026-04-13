@@ -2,7 +2,7 @@ name: CI - Smoke Tests
 
 on:
   push:
-    branches: ["main", "master", "copilot/**"]
+    branches: ["main", "master"]
   pull_request:
     branches: ["main", "master"]
 

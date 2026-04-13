@@ -19,6 +19,9 @@ class Conversation(BaseModel):
     title: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     status: Mapped[str] = mapped_column(String(50), default="active", nullable=False)
     extra_data: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # Agent fields
+    agent_phase: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    agent_phase_before_change: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
 
     # Relationships
     user: Mapped["User"] = relationship("User", back_populates="conversations")
