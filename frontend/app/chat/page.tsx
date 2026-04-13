@@ -338,7 +338,7 @@ export default function ChatPage() {
 
   async function sendMessage(overrideText?: string) {
     const trimmed = (overrideText ?? input).trim()
-    if (!trimmed || loading) return
+    if (!trimmed || loading || phaseChanging) return
 
     const userMessage: Message = { role: 'user', content: trimmed }
     const next = [...messages, userMessage]
@@ -502,6 +502,36 @@ export default function ChatPage() {
     setPhaseChanging(true)
     setError(null)
 
+    // Immediately pre-fetch the new phase document so the right panel updates
+    // without waiting for the AI response (which can take 20-30 s).
+    const nextIndex = direction === 'next' ? phaseIndex + 1 : phaseIndex - 1
+    const nextPhaseKey =
+      nextIndex >= 0 && nextIndex < PHASE_KEYS.length ? PHASE_KEYS[nextIndex] : null
+    if (nextPhaseKey) {
+      try {
+        const pdRes = await fetch(
+          `${API_URL}/api/v1/agent/phase-document/${sessionId}/${nextPhaseKey}`,
+          { headers: getAuthHeaders() },
+        )
+        if (pdRes.ok) {
+          const pdData = await pdRes.json()
+          if (pdData.content) {
+            setPhaseDocument({
+              phase: pdData.phase,
+              title: pdData.title,
+              content: pdData.content,
+              rendered_at: pdData.rendered_at,
+              turn_count: pdData.turn_count,
+            })
+            setShowPhaseDoc(true)
+          }
+        }
+      } catch (e) {
+        // Non-critical: the main switch-phase response will update the panel
+        console.debug('[switchPhase] pre-fetch phase document failed', e)
+      }
+    }
+
     try {
       const res = await fetchWithTimeout(
         `${API_URL}/api/v1/agent/switch-phase`,
@@ -545,11 +575,11 @@ export default function ChatPage() {
       } else {
         setShowTechStackPicker(false)
       }
-      // Update the phase document panel
+      // Update the phase document panel with the post-switch document (includes knowledge extracted from AI intro)
       if (data.phase_document) {
         setPhaseDocument(data.phase_document)
-        setShowPhaseDoc(true)
       }
+      setShowPhaseDoc(true)
     } catch (err: unknown) {
       const isTimeout = err instanceof DOMException && err.name === 'TimeoutError'
       const msg = isTimeout
@@ -770,12 +800,12 @@ export default function ChatPage() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              disabled={loading}
+              disabled={loading || phaseChanging}
               aria-label="message input"
             />
             <button
               onClick={() => sendMessage()}
-              disabled={loading || !input.trim()}
+              disabled={loading || phaseChanging || !input.trim()}
               className="px-5 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium"
               aria-label="send message"
             >
