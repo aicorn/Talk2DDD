@@ -45,6 +45,29 @@ _context_manager = ContextManager()
 _renderer = PhaseDocumentRenderer()
 
 
+def _friendly_ai_error(exc: Exception) -> str:
+    """Return a user-friendly Chinese error message for an AI provider error.
+
+    Translates transient capacity / rate-limit errors into short, actionable
+    messages so users aren't shown raw JSON error bodies.
+    """
+    # openai.APIStatusError carries a numeric status_code attribute
+    status_code: int | None = getattr(exc, "status_code", None)
+    if status_code in (429, 529):
+        return "AI 服务当前繁忙，请稍等几秒后点击「重试」。"
+    if status_code in (500, 502, 503):
+        return "AI 服务暂时不可用，请稍后重试。"
+    # Connection / timeout errors
+    exc_type = type(exc).__name__
+    if "Connection" in exc_type or "Timeout" in exc_type:
+        return "无法连接到 AI 服务，请检查网络后重试。"
+    # Fallback: include a shortened version of the original error
+    msg = str(exc)
+    if len(msg) > 200:
+        msg = msg[:200] + "…"
+    return f"AI 服务调用失败：{msg}"
+
+
 # ---------------------------------------------------------------------------
 # Helper: resolve or create conversation
 # ---------------------------------------------------------------------------
@@ -116,7 +139,7 @@ async def agent_chat(
     except (openai.OpenAIError, ValueError, RuntimeError) as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"AI provider error: {exc}",
+            detail=_friendly_ai_error(exc),
         ) from exc
     except Exception as exc:
         # Catch-all: any unhandled exception (DB errors, unexpected failures)
@@ -190,7 +213,7 @@ async def generate_document(
     except (openai.OpenAIError, ValueError, RuntimeError) as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"文档生成失败：{exc}",
+            detail=_friendly_ai_error(exc),
         ) from exc
     except Exception as exc:
         logger.exception("Unhandled error in generate_document: %s", exc)

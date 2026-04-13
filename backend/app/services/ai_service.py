@@ -2,12 +2,26 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from enum import Enum
 from typing import List
 
+import openai
 from openai import AsyncOpenAI
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+# Transient HTTP status codes that are safe to retry.
+_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 529}
+
+# Maximum number of automatic retries for retryable errors.
+_MAX_RETRIES = 3
+
+# Initial back-off in seconds; doubles on each subsequent attempt.
+_RETRY_BACKOFF_BASE = 1.0
 
 
 class AIProvider(str, Enum):
@@ -95,9 +109,12 @@ async def chat_completion(
 ) -> str:
     """Send *messages* to the selected AI provider and return the reply text.
 
+    Automatically retries on transient errors (HTTP 429, 500, 502, 503, 529)
+    with exponential back-off (up to :data:`_MAX_RETRIES` attempts).
+
     Args:
         messages: List of ``{"role": ..., "content": ...}`` dicts.
-        provider: Provider name ("openai" or "deepseek").
+        provider: Provider name ("openai", "deepseek", or "minimax").
                   Falls back to ``settings.AI_PROVIDER`` when *None*.
 
     Returns:
@@ -106,11 +123,46 @@ async def chat_completion(
     provider = provider or settings.AI_PROVIDER
     client, model = get_ai_client(provider)
 
-    response = await client.chat.completions.create(
-        model=model,
-        messages=messages,
-    )
-    choices = response.choices
-    if not choices:
-        raise RuntimeError("AI provider returned an empty choices list")
-    return choices[0].message.content or ""
+    last_exc: Exception | None = None
+    for attempt in range(_MAX_RETRIES):
+        try:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+            )
+            choices = response.choices
+            if not choices:
+                raise RuntimeError("AI provider returned an empty choices list")
+            return choices[0].message.content or ""
+        except openai.APIStatusError as exc:
+            if exc.status_code in _RETRYABLE_STATUS_CODES and attempt < _MAX_RETRIES - 1:
+                wait = _RETRY_BACKOFF_BASE * (2 ** attempt)
+                logger.warning(
+                    "AI provider returned HTTP %s (attempt %d/%d), retrying in %.1fs: %s",
+                    exc.status_code,
+                    attempt + 1,
+                    _MAX_RETRIES,
+                    wait,
+                    exc,
+                )
+                await asyncio.sleep(wait)
+                last_exc = exc
+                continue
+            raise
+        except (openai.APIConnectionError, openai.APITimeoutError) as exc:
+            if attempt < _MAX_RETRIES - 1:
+                wait = _RETRY_BACKOFF_BASE * (2 ** attempt)
+                logger.warning(
+                    "AI provider connection error (attempt %d/%d), retrying in %.1fs: %s",
+                    attempt + 1,
+                    _MAX_RETRIES,
+                    wait,
+                    exc,
+                )
+                await asyncio.sleep(wait)
+                last_exc = exc
+                continue
+            raise
+
+    # Should not be reached, but satisfy type checker
+    raise last_exc  # type: ignore[misc]
