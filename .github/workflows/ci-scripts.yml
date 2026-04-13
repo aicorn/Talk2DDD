@@ -2,7 +2,7 @@ name: CI - Scripts
 
 on:
   push:
-    branches: ["main", "master", "copilot/**"]
+    branches: ["main", "master"]
     paths:
       - "scripts/**"
       - ".github/workflows/ci-scripts.yml"

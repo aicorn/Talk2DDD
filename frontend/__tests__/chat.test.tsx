@@ -11,7 +11,7 @@ jest.mock('next/navigation', () => ({
 }))
 
 // Provide a valid auth token by default; individual tests override as needed.
-const mockGetAuthHeaders = jest.fn(() => ({ Authorization: 'Bearer test-token' }))
+const mockGetAuthHeaders = jest.fn<Record<string, string>, []>(() => ({ Authorization: 'Bearer test-token' }))
 jest.mock('../lib/auth', () => ({
   getAuthHeaders: () => mockGetAuthHeaders(),
 }))
