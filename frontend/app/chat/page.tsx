@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -86,6 +86,14 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? ''
 const THINK_PREVIEW_LEN = 60
 
 /**
+ * Base timeout (ms) for frontend fetch calls to the agent API.
+ * Slightly longer than the backend AI_REQUEST_TIMEOUT (120 s) to allow for
+ * AI processing time plus network round-trip overhead.
+ * On a timeout retry the value is automatically doubled (see retryLastMessage).
+ */
+const FETCH_TIMEOUT_BASE_MS = 150_000 // 150 s
+
+/**
  * Checks whether a failed API response is an authentication error (401/403).
  * Returns the error message to throw, or null if it's not auth-related.
  */
@@ -95,6 +103,25 @@ function parseApiError(res: Response, body: { detail?: string }): string {
     return '__AUTH_ERROR__'
   }
   return body.detail ?? `HTTP ${res.status}`
+}
+
+/**
+ * `fetch` wrapper that aborts the request after `timeoutMs` milliseconds.
+ * Throws a `DOMException` with name `"TimeoutError"` on expiry so callers
+ * can distinguish a timeout from other network failures.
+ */
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(new DOMException('Request timed out', 'TimeoutError')), timeoutMs)
+  try {
+    return await fetch(url, { ...options, signal: controller.signal })
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 function getStoredProvider(): Provider {
@@ -228,6 +255,10 @@ export default function ChatPage() {
   const [techStackPreferences, setTechStackPreferences] = useState<TechStackPreferences | null>(null)
   const [showTechStackPicker, setShowTechStackPicker] = useState(false)
   const [phaseChanging, setPhaseChanging] = useState(false)
+  // Fetch timeout in ms; doubles automatically when a retry follows a timeout.
+  const fetchTimeoutMs = useRef<number>(FETCH_TIMEOUT_BASE_MS)
+  // True when the most recent failure was a timeout; drives the doubling logic.
+  const lastErrorWasTimeout = useRef<boolean>(false)
 
   // Auth guard: redirect to /login when no token is present
   useEffect(() => {
@@ -317,14 +348,18 @@ export default function ChatPage() {
     setError(null)
 
     try {
-      const res = await fetch(`${API_URL}/api/v1/agent/chat`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...getAuthHeaders(),
+      const res = await fetchWithTimeout(
+        `${API_URL}/api/v1/agent/chat`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...getAuthHeaders(),
+          },
+          body: JSON.stringify({ session_id: sessionId, message: trimmed, provider }),
         },
-        body: JSON.stringify({ session_id: sessionId, message: trimmed, provider }),
-      })
+        fetchTimeoutMs.current,
+      )
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
@@ -338,6 +373,8 @@ export default function ChatPage() {
       setSuggestions(data.suggestions ?? [])
       setPendingDocuments(data.pending_documents ?? [])
       setLastFailedMessage(null)
+      lastErrorWasTimeout.current = false
+      fetchTimeoutMs.current = FETCH_TIMEOUT_BASE_MS
       if (data.tech_stack_preferences !== undefined) {
         setTechStackPreferences(data.tech_stack_preferences)
       }
@@ -352,11 +389,18 @@ export default function ChatPage() {
         setShowPhaseDoc(true)
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : '发生未知错误，请重试'
+      const isTimeout =
+        err instanceof DOMException && err.name === 'TimeoutError'
+      const msg = isTimeout
+        ? `请求超时（等待 ${Math.round(fetchTimeoutMs.current / 1000)} 秒无响应），请点击「重试」`
+        : err instanceof Error
+          ? err.message
+          : '发生未知错误，请重试'
       if (msg === '__AUTH_ERROR__') {
         router.push('/login')
         return
       }
+      lastErrorWasTimeout.current = isTimeout
       setError(msg)
       setLastFailedMessage(trimmed)
     } finally {
@@ -374,6 +418,10 @@ export default function ChatPage() {
   /** Re-send the last failed message: remove its bubble then replay it. */
   function retryLastMessage() {
     if (!lastFailedMessage || loading) return
+    // If the previous attempt timed out, double the timeout for this retry.
+    if (lastErrorWasTimeout.current) {
+      fetchTimeoutMs.current = fetchTimeoutMs.current * 2
+    }
     // Capture the value before clearing state so sendMessage receives the
     // correct text even after the state updates are batched.
     const msgToRetry = lastFailedMessage
@@ -395,14 +443,18 @@ export default function ChatPage() {
     setGeneratingDoc(documentType)
     setError(null)
     try {
-      const res = await fetch(`${API_URL}/api/v1/agent/generate-document`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...getAuthHeaders(),
+      const res = await fetchWithTimeout(
+        `${API_URL}/api/v1/agent/generate-document`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...getAuthHeaders(),
+          },
+          body: JSON.stringify({ session_id: sessionId, document_type: documentType, provider }),
         },
-        body: JSON.stringify({ session_id: sessionId, document_type: documentType, provider }),
-      })
+        fetchTimeoutMs.current,
+      )
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
         throw new Error(parseApiError(res, data))
@@ -429,7 +481,12 @@ export default function ChatPage() {
       // Remove this doc type from the pending list
       setPendingDocuments((prev) => prev.filter((t) => t !== documentType))
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : '文档生成失败，请重试'
+      const isTimeout = err instanceof DOMException && err.name === 'TimeoutError'
+      const msg = isTimeout
+        ? `文档生成请求超时（等待 ${Math.round(fetchTimeoutMs.current / 1000)} 秒无响应），请重试`
+        : err instanceof Error
+          ? err.message
+          : '文档生成失败，请重试'
       if (msg === '__AUTH_ERROR__') {
         router.push('/login')
         return
@@ -446,14 +503,18 @@ export default function ChatPage() {
     setError(null)
 
     try {
-      const res = await fetch(`${API_URL}/api/v1/agent/switch-phase`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...getAuthHeaders(),
+      const res = await fetchWithTimeout(
+        `${API_URL}/api/v1/agent/switch-phase`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...getAuthHeaders(),
+          },
+          body: JSON.stringify({ session_id: sessionId, direction, provider }),
         },
-        body: JSON.stringify({ session_id: sessionId, direction, provider }),
-      })
+        fetchTimeoutMs.current,
+      )
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
@@ -490,7 +551,12 @@ export default function ChatPage() {
         setShowPhaseDoc(true)
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : '阶段切换失败，请重试'
+      const isTimeout = err instanceof DOMException && err.name === 'TimeoutError'
+      const msg = isTimeout
+        ? `阶段切换请求超时（等待 ${Math.round(fetchTimeoutMs.current / 1000)} 秒无响应），请重试`
+        : err instanceof Error
+          ? err.message
+          : '阶段切换失败，请重试'
       if (msg === '__AUTH_ERROR__') {
         router.push('/login')
         return
