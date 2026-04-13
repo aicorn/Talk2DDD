@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -9,7 +9,7 @@ import { getAuthHeaders } from '@/lib/auth'
 type Provider = 'openai' | 'deepseek' | 'minimax'
 
 interface Message {
-  role: 'user' | 'assistant'
+  role: 'user' | 'assistant' | 'system'
   content: string
 }
 
@@ -33,6 +33,7 @@ interface AgentChatResponse {
   pending_documents: string[]
   phase_document: PhaseDocument | null
   tech_stack_preferences: TechStackPreferences | null
+  phase_changed?: boolean
 }
 
 interface TechChoice {
@@ -83,6 +84,45 @@ const DOC_TYPE_LABELS: Record<string, string> = {
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? ''
 const THINK_PREVIEW_LEN = 60
+
+/**
+ * Base timeout (ms) for frontend fetch calls to the agent API.
+ * Slightly longer than the backend AI_REQUEST_TIMEOUT (120 s) to allow for
+ * AI processing time plus network round-trip overhead.
+ * On a timeout retry the value is automatically doubled (see retryLastMessage).
+ */
+const FETCH_TIMEOUT_BASE_MS = 150_000 // 150 s
+
+/**
+ * Checks whether a failed API response is an authentication error (401/403).
+ * Returns the error message to throw, or null if it's not auth-related.
+ */
+function parseApiError(res: Response, body: { detail?: string }): string {
+  if (res.status === 401 || res.status === 403) {
+    // Return a sentinel that callers can recognise
+    return '__AUTH_ERROR__'
+  }
+  return body.detail ?? `HTTP ${res.status}`
+}
+
+/**
+ * `fetch` wrapper that aborts the request after `timeoutMs` milliseconds.
+ * Throws a `DOMException` with name `"TimeoutError"` on expiry so callers
+ * can distinguish a timeout from other network failures.
+ */
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(new DOMException('Request timed out', 'TimeoutError')), timeoutMs)
+  try {
+    return await fetch(url, { ...options, signal: controller.signal })
+  } finally {
+    clearTimeout(timer)
+  }
+}
 
 function getStoredProvider(): Provider {
   if (typeof window === 'undefined') return 'openai'
@@ -214,6 +254,11 @@ export default function ChatPage() {
   const [generatingDoc, setGeneratingDoc] = useState<string | null>(null)
   const [techStackPreferences, setTechStackPreferences] = useState<TechStackPreferences | null>(null)
   const [showTechStackPicker, setShowTechStackPicker] = useState(false)
+  const [phaseChanging, setPhaseChanging] = useState(false)
+  // Fetch timeout in ms; doubles automatically when a retry follows a timeout.
+  const fetchTimeoutMs = useRef<number>(FETCH_TIMEOUT_BASE_MS)
+  // True when the most recent failure was a timeout; drives the doubling logic.
+  const lastErrorWasTimeout = useRef<boolean>(false)
 
   // Auth guard: redirect to /login when no token is present
   useEffect(() => {
@@ -293,7 +338,7 @@ export default function ChatPage() {
 
   async function sendMessage(overrideText?: string) {
     const trimmed = (overrideText ?? input).trim()
-    if (!trimmed || loading) return
+    if (!trimmed || loading || phaseChanging) return
 
     const userMessage: Message = { role: 'user', content: trimmed }
     const next = [...messages, userMessage]
@@ -303,18 +348,22 @@ export default function ChatPage() {
     setError(null)
 
     try {
-      const res = await fetch(`${API_URL}/api/v1/agent/chat`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...getAuthHeaders(),
+      const res = await fetchWithTimeout(
+        `${API_URL}/api/v1/agent/chat`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...getAuthHeaders(),
+          },
+          body: JSON.stringify({ session_id: sessionId, message: trimmed, provider }),
         },
-        body: JSON.stringify({ session_id: sessionId, message: trimmed, provider }),
-      })
+        fetchTimeoutMs.current,
+      )
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
-        throw new Error(data.detail ?? `HTTP ${res.status}`)
+        throw new Error(parseApiError(res, data))
       }
 
       const data: AgentChatResponse = await res.json()
@@ -324,6 +373,8 @@ export default function ChatPage() {
       setSuggestions(data.suggestions ?? [])
       setPendingDocuments(data.pending_documents ?? [])
       setLastFailedMessage(null)
+      lastErrorWasTimeout.current = false
+      fetchTimeoutMs.current = FETCH_TIMEOUT_BASE_MS
       if (data.tech_stack_preferences !== undefined) {
         setTechStackPreferences(data.tech_stack_preferences)
       }
@@ -338,7 +389,19 @@ export default function ChatPage() {
         setShowPhaseDoc(true)
       }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : '发生未知错误，请重试')
+      const isTimeout =
+        err instanceof DOMException && err.name === 'TimeoutError'
+      const msg = isTimeout
+        ? `请求超时（等待 ${Math.round(fetchTimeoutMs.current / 1000)} 秒无响应），请点击「重试」`
+        : err instanceof Error
+          ? err.message
+          : '发生未知错误，请重试'
+      if (msg === '__AUTH_ERROR__') {
+        router.push('/login')
+        return
+      }
+      lastErrorWasTimeout.current = isTimeout
+      setError(msg)
       setLastFailedMessage(trimmed)
     } finally {
       setLoading(false)
@@ -355,6 +418,10 @@ export default function ChatPage() {
   /** Re-send the last failed message: remove its bubble then replay it. */
   function retryLastMessage() {
     if (!lastFailedMessage || loading) return
+    // If the previous attempt timed out, double the timeout for this retry.
+    if (lastErrorWasTimeout.current) {
+      fetchTimeoutMs.current = fetchTimeoutMs.current * 2
+    }
     // Capture the value before clearing state so sendMessage receives the
     // correct text even after the state updates are batched.
     const msgToRetry = lastFailedMessage
@@ -376,17 +443,21 @@ export default function ChatPage() {
     setGeneratingDoc(documentType)
     setError(null)
     try {
-      const res = await fetch(`${API_URL}/api/v1/agent/generate-document`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...getAuthHeaders(),
+      const res = await fetchWithTimeout(
+        `${API_URL}/api/v1/agent/generate-document`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...getAuthHeaders(),
+          },
+          body: JSON.stringify({ session_id: sessionId, document_type: documentType, provider }),
         },
-        body: JSON.stringify({ session_id: sessionId, document_type: documentType, provider }),
-      })
+        fetchTimeoutMs.current,
+      )
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
-        throw new Error(data.detail ?? `HTTP ${res.status}`)
+        throw new Error(parseApiError(res, data))
       }
       const data = await res.json()
       const label = DOC_TYPE_LABELS[documentType] ?? documentType
@@ -410,9 +481,119 @@ export default function ChatPage() {
       // Remove this doc type from the pending list
       setPendingDocuments((prev) => prev.filter((t) => t !== documentType))
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : '文档生成失败，请重试')
+      const isTimeout = err instanceof DOMException && err.name === 'TimeoutError'
+      const msg = isTimeout
+        ? `文档生成请求超时（等待 ${Math.round(fetchTimeoutMs.current / 1000)} 秒无响应），请重试`
+        : err instanceof Error
+          ? err.message
+          : '文档生成失败，请重试'
+      if (msg === '__AUTH_ERROR__') {
+        router.push('/login')
+        return
+      }
+      setError(msg)
     } finally {
       setGeneratingDoc(null)
+    }
+  }
+
+  async function switchPhase(direction: 'next' | 'back') {
+    if (phaseChanging || loading) return
+    setPhaseChanging(true)
+    setError(null)
+
+    // Immediately pre-fetch the new phase document so the right panel updates
+    // without waiting for the AI response (which can take 20-30 s).
+    const nextIndex = direction === 'next' ? phaseIndex + 1 : phaseIndex - 1
+    const nextPhaseKey =
+      nextIndex >= 0 && nextIndex < PHASE_KEYS.length ? PHASE_KEYS[nextIndex] : null
+    if (nextPhaseKey) {
+      try {
+        const pdRes = await fetch(
+          `${API_URL}/api/v1/agent/phase-document/${sessionId}/${nextPhaseKey}`,
+          { headers: getAuthHeaders() },
+        )
+        if (pdRes.ok) {
+          const pdData = await pdRes.json()
+          if (pdData.content) {
+            setPhaseDocument({
+              phase: pdData.phase,
+              title: pdData.title,
+              content: pdData.content,
+              rendered_at: pdData.rendered_at,
+              turn_count: pdData.turn_count,
+            })
+            setShowPhaseDoc(true)
+          }
+        }
+      } catch (e) {
+        // Non-critical: the main switch-phase response will update the panel
+        console.debug('[switchPhase] pre-fetch phase document failed', e)
+      }
+    }
+
+    try {
+      const res = await fetchWithTimeout(
+        `${API_URL}/api/v1/agent/switch-phase`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...getAuthHeaders(),
+          },
+          body: JSON.stringify({ session_id: sessionId, direction, provider }),
+        },
+        fetchTimeoutMs.current,
+      )
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(parseApiError(res, data))
+      }
+
+      const data: AgentChatResponse = await res.json()
+
+      // Insert a system notification banner followed by the AI intro message
+      const phaseLabel = data.phase_label ?? data.phase
+      const systemNotice: Message = {
+        role: 'system',
+        content: `🔄 已切换至「${phaseLabel}」阶段`,
+      }
+      const aiMsg: Message = { role: 'assistant', content: data.reply }
+      setMessages((prev) => [...prev, systemNotice, aiMsg])
+
+      // Update phase state
+      setPhase(data.phase)
+      setProgress(data.progress)
+      setSuggestions(data.suggestions ?? [])
+      setPendingDocuments(data.pending_documents ?? [])
+      if (data.tech_stack_preferences !== undefined) {
+        setTechStackPreferences(data.tech_stack_preferences)
+      }
+      if (data.phase === 'MODEL_DESIGN' && data.tech_stack_preferences && !data.tech_stack_preferences.confirmed) {
+        setShowTechStackPicker(true)
+      } else {
+        setShowTechStackPicker(false)
+      }
+      // Update the phase document panel with the post-switch document (includes knowledge extracted from AI intro)
+      if (data.phase_document) {
+        setPhaseDocument(data.phase_document)
+      }
+      setShowPhaseDoc(true)
+    } catch (err: unknown) {
+      const isTimeout = err instanceof DOMException && err.name === 'TimeoutError'
+      const msg = isTimeout
+        ? `阶段切换请求超时（等待 ${Math.round(fetchTimeoutMs.current / 1000)} 秒无响应），请重试`
+        : err instanceof Error
+          ? err.message
+          : '阶段切换失败，请重试'
+      if (msg === '__AUTH_ERROR__') {
+        router.push('/login')
+        return
+      }
+      setError(msg)
+    } finally {
+      setPhaseChanging(false)
     }
   }
 
@@ -442,6 +623,18 @@ export default function ChatPage() {
 
       {/* Phase navigation bar */}
       <div className="flex items-center gap-1.5 px-4 py-2 bg-gray-50 border-b overflow-x-auto shrink-0" aria-label="phase navigation">
+        {/* Previous phase button */}
+        <button
+          onClick={() => switchPhase('back')}
+          disabled={phaseChanging || loading || phaseIndex === 0}
+          className="shrink-0 flex items-center gap-1 px-2.5 py-1 text-xs rounded-lg bg-white border border-gray-300 text-gray-600 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed"
+          aria-label={phaseChanging ? '切换阶段中，请稍候' : '上一阶段'}
+          aria-busy={phaseChanging}
+          title="切换到上一阶段"
+        >
+          {phaseChanging ? <span aria-hidden="true">⏳</span> : <span aria-hidden="true">←</span>} 上一阶段
+        </button>
+
         {PHASE_KEYS.map((p, i) => (
           <span
             key={p}
@@ -456,6 +649,19 @@ export default function ChatPage() {
             P{i + 1} {PHASE_LABELS[p]}
           </span>
         ))}
+
+        {/* Next phase button */}
+        <button
+          onClick={() => switchPhase('next')}
+          disabled={phaseChanging || loading || phaseIndex === PHASE_KEYS.length - 1}
+          className="shrink-0 flex items-center gap-1 px-2.5 py-1 text-xs rounded-lg bg-white border border-gray-300 text-gray-600 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed"
+          aria-label={phaseChanging ? '切换阶段中，请稍候' : '下一阶段'}
+          aria-busy={phaseChanging}
+          title="切换到下一阶段"
+        >
+          下一阶段 {phaseChanging ? <span aria-hidden="true">⏳</span> : <span aria-hidden="true">→</span>}
+        </button>
+
         <div className="ml-auto flex items-center gap-2 shrink-0 pl-2">
           <div className="w-20 h-1.5 bg-gray-200 rounded-full overflow-hidden" aria-label="progress bar">
             <div
@@ -485,9 +691,22 @@ export default function ChatPage() {
             {messages.map((msg, i) => (
               <div
                 key={i}
-                className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                className={`flex ${
+                  msg.role === 'system'
+                    ? 'justify-center'
+                    : msg.role === 'user'
+                    ? 'justify-end'
+                    : 'justify-start'
+                }`}
               >
-                {msg.role === 'user' ? (
+                {msg.role === 'system' ? (
+                  // Phase-switch system notification banner
+                  <div className="w-full text-center py-1">
+                    <span className="inline-block px-4 py-1 text-xs text-blue-600 bg-blue-50 border border-blue-200 rounded-full font-medium">
+                      {msg.content}
+                    </span>
+                  </div>
+                ) : msg.role === 'user' ? (
                   <div className="max-w-[75%] rounded-lg px-4 py-2 text-sm bg-blue-600 text-white">
                     {msg.content}
                   </div>
@@ -581,12 +800,12 @@ export default function ChatPage() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              disabled={loading}
+              disabled={loading || phaseChanging}
               aria-label="message input"
             />
             <button
               onClick={() => sendMessage()}
-              disabled={loading || !input.trim()}
+              disabled={loading || phaseChanging || !input.trim()}
               className="px-5 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium"
               aria-label="send message"
             >

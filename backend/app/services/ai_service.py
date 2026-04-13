@@ -23,6 +23,10 @@ _MAX_RETRIES = 3
 # Initial back-off in seconds; doubles on each subsequent attempt.
 _RETRY_BACKOFF_BASE = 1.0
 
+# Connect timeout used for all providers (seconds).
+# Generous enough for slow routes to Chinese/international API endpoints.
+_CONNECT_TIMEOUT = 15.0
+
 
 class AIProvider(str, Enum):
     OPENAI = "openai"
@@ -111,6 +115,8 @@ async def chat_completion(
 
     Automatically retries on transient errors (HTTP 429, 500, 502, 503, 529)
     with exponential back-off (up to :data:`_MAX_RETRIES` attempts).
+    When a request fails specifically due to a timeout, the timeout is doubled
+    for the next attempt to give the provider more time to respond.
 
     Args:
         messages: List of ``{"role": ..., "content": ...}`` dicts.
@@ -123,17 +129,42 @@ async def chat_completion(
     provider = provider or settings.AI_PROVIDER
     client, model = get_ai_client(provider)
 
+    current_timeout = float(settings.AI_REQUEST_TIMEOUT)
     last_exc: Exception | None = None
     for attempt in range(_MAX_RETRIES):
+        request_timeout = openai.Timeout(
+            timeout=current_timeout,
+            connect=_CONNECT_TIMEOUT,
+        )
         try:
             response = await client.chat.completions.create(
                 model=model,
                 messages=messages,
+                timeout=request_timeout,
             )
             choices = response.choices
             if not choices:
                 raise RuntimeError("AI provider returned an empty choices list")
             return choices[0].message.content or ""
+        except openai.APITimeoutError as exc:
+            if attempt < _MAX_RETRIES - 1:
+                wait = _RETRY_BACKOFF_BASE * (2 ** attempt)
+                next_timeout = current_timeout * 2
+                logger.warning(
+                    "AI provider timed out after %.0fs (attempt %d/%d), "
+                    "retrying in %.1fs with doubled timeout %.0fs: %s",
+                    current_timeout,
+                    attempt + 1,
+                    _MAX_RETRIES,
+                    wait,
+                    next_timeout,
+                    exc,
+                )
+                current_timeout = next_timeout
+                await asyncio.sleep(wait)
+                last_exc = exc
+                continue
+            raise
         except openai.APIStatusError as exc:
             if exc.status_code in _RETRYABLE_STATUS_CODES and attempt < _MAX_RETRIES - 1:
                 wait = _RETRY_BACKOFF_BASE * (2 ** attempt)
@@ -149,7 +180,7 @@ async def chat_completion(
                 last_exc = exc
                 continue
             raise
-        except (openai.APIConnectionError, openai.APITimeoutError) as exc:
+        except openai.APIConnectionError as exc:
             if attempt < _MAX_RETRIES - 1:
                 wait = _RETRY_BACKOFF_BASE * (2 ** attempt)
                 logger.warning(

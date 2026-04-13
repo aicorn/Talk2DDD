@@ -35,6 +35,7 @@ from app.schemas.agent import (
     RequirementChangesResponse,
     SessionMessageItem,
     SessionMessagesResponse,
+    SwitchPhaseRequest,
 )
 
 import uuid as _uuid
@@ -228,6 +229,82 @@ async def generate_document(
         version_id=version_id,
         project_id=project_id,
         generated_at=datetime.now(timezone.utc),
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /switch-phase
+# ---------------------------------------------------------------------------
+
+
+@router.post("/switch-phase", response_model=AgentChatResponse, status_code=200)
+async def switch_phase(
+    request: SwitchPhaseRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AgentChatResponse:
+    """Manually advance or retreat one phase and return an AI-generated phase intro.
+
+    The AI response is focused on orienting the user in the new phase rather
+    than continuing the previous topic.  The direction parameter must be either
+    ``"next"`` (advance) or ``"back"`` (retreat).  Returns HTTP 400 when the
+    session is already at the first or last phase.
+    """
+    await _ensure_conversation(request.session_id, current_user, None, db)
+
+    try:
+        result = await _agent_core.switch_phase(
+            session_id=request.session_id,
+            direction=request.direction,
+            db=db,
+            provider=request.provider,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except (openai.OpenAIError, RuntimeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=_friendly_ai_error(exc),
+        ) from exc
+    except Exception as exc:
+        logger.exception("Unhandled error in switch_phase: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="服务器内部错误，请稍后重试",
+        ) from exc
+
+    phase_doc = None
+    if result.phase_document:
+        pd = result.phase_document
+        phase_doc = PhaseDocumentSchema(
+            phase=pd.phase,
+            title=pd.title,
+            content=pd.content,
+            rendered_at=pd.rendered_at,
+            turn_count=pd.turn_count,
+        )
+
+    return AgentChatResponse(
+        reply=result.reply,
+        session_id=result.session_id,
+        phase=result.phase,
+        phase_label=result.phase_label,
+        progress=result.progress,
+        suggestions=result.suggestions,
+        extracted_concepts=[
+            ExtractedConcept(**c) for c in result.extracted_concepts
+        ],
+        requirement_changes=[
+            RequirementChangeSummary(**c) for c in result.requirement_changes
+        ],
+        stale_documents=result.stale_documents,
+        pending_documents=result.pending_documents,
+        phase_document=phase_doc,
+        tech_stack_preferences=result.tech_stack_preferences,
+        phase_changed=result.phase_changed,
     )
 
 

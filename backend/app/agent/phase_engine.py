@@ -11,52 +11,6 @@ from app.agent.context import (
     PHASE_ORDER,
 )
 
-# Exit-condition lambdas for each phase
-_EXIT_CONDITIONS = {
-    Phase.ICEBREAK: lambda ctx: bool(
-        ctx.domain_knowledge.project_name and ctx.domain_knowledge.domain_description
-    ),
-    Phase.REQUIREMENT: lambda ctx: len(
-        [
-            s
-            for s in ctx.domain_knowledge.business_scenarios
-            if s.status.value != "DEPRECATED"
-        ]
-    )
-    >= 3,
-    Phase.DOMAIN_EXPLORE: lambda ctx: len(ctx.domain_knowledge.domain_concepts) >= 5,
-    Phase.MODEL_DESIGN: lambda ctx: len(ctx.domain_knowledge.bounded_contexts) >= 1,
-    Phase.DOC_GENERATE: lambda ctx: any(
-        d.status.value == "CURRENT" for d in ctx.generated_documents
-    ),
-    Phase.REVIEW_REFINE: lambda ctx: False,  # only manual completion
-}
-
-# Phases where requirement-change rollback is allowed
-_ROLLBACK_ENABLED_PHASES = {
-    Phase.DOMAIN_EXPLORE,
-    Phase.MODEL_DESIGN,
-    Phase.DOC_GENERATE,
-    Phase.REVIEW_REFINE,
-}
-
-# Chinese keywords that signal a requirement change
-_CHANGE_SIGNALS = [
-    "还有一个需求",
-    "另外",
-    "补充一点",
-    "之前说的",
-    "其实",
-    "改一下",
-    "调整一下",
-    "变成了",
-    "取消",
-    "砍掉",
-    "不需要了",
-    "去掉",
-    "/change",
-]
-
 
 class PhaseEngine:
     """Evaluates and applies phase transitions for an AgentContext."""
@@ -65,7 +19,8 @@ class PhaseEngine:
         """Check whether a phase transition should occur.
 
         Returns the target Phase if a transition is warranted, else None.
-        Side-effect: sets ctx.phase_before_change on rollback.
+        Only explicit slash commands trigger a phase change — all other
+        phase navigation is handled via the UI buttons (switch_phase).
         """
         msg_lower = user_message.lower()
 
@@ -90,16 +45,6 @@ class PhaseEngine:
             # Jump to MODEL_DESIGN so the tech stack instructions are active
             return Phase.MODEL_DESIGN
 
-        # Automatic exit-condition check
-        if _EXIT_CONDITIONS[ctx.current_phase](ctx):
-            return self._next_phase(ctx)
-
-        # Requirement-change rollback (P3–P6 only)
-        if ctx.current_phase in _ROLLBACK_ENABLED_PHASES:
-            if any(signal in user_message for signal in _CHANGE_SIGNALS):
-                ctx.phase_before_change = ctx.current_phase
-                return Phase.REQUIREMENT
-
         return None
 
     def advance_phase(
@@ -117,6 +62,25 @@ class PhaseEngine:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def get_adjacent_phase(self, ctx: AgentContext, direction: str) -> Optional[Phase]:
+        """Return the phase adjacent to the current one in *direction*.
+
+        Args:
+            ctx: Current agent context.
+            direction: ``"next"`` for the following phase, ``"back"`` for the previous.
+
+        Returns:
+            The target :class:`Phase`, or ``None`` if already at the boundary.
+
+        Raises:
+            ValueError: If *direction* is not ``"next"`` or ``"back"``.
+        """
+        if direction == "next":
+            return self._next_phase(ctx)
+        if direction == "back":
+            return self._prev_phase(ctx)
+        raise ValueError(f"Invalid direction '{direction}'. Must be 'next' or 'back'.")
 
     def _next_phase(self, ctx: AgentContext) -> Optional[Phase]:
         try:

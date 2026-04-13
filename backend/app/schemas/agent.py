@@ -49,6 +49,15 @@ class AgentChatResponse(BaseModel):
     pending_documents: List[str] = Field(default_factory=list)
     phase_document: Optional[PhaseDocumentSchema] = None
     tech_stack_preferences: Optional[Dict[str, Any]] = None
+    phase_changed: bool = False
+
+
+class SwitchPhaseRequest(BaseModel):
+    session_id: str = Field(..., description="Conversation UUID")
+    direction: Literal["next", "back"] = Field(
+        ..., description="Direction to navigate: 'next' advances one phase, 'back' retreats one phase"
+    )
+    provider: Optional[Literal["openai", "deepseek", "minimax"]] = None
 
 
 class GenerateDocumentRequest(BaseModel):

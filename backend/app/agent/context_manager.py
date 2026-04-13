@@ -134,3 +134,28 @@ class ContextManager:
             )
         )
         await db.flush()
+
+    async def append_assistant_only(
+        self,
+        session_id: str,
+        assistant_reply: str,
+        db: AsyncSession,
+    ) -> None:
+        """Persist a single assistant message to the Message table (no user turn).
+
+        Used for phase-switch AI introductions where the trigger message is an
+        internal system action and should not appear in the user-visible history.
+        """
+        try:
+            conv_uuid = uuid.UUID(session_id)
+        except ValueError:
+            return
+
+        db.add(
+            Message(
+                conversation_id=conv_uuid,
+                role="assistant",
+                content=assistant_reply,
+            )
+        )
+        await db.flush()
