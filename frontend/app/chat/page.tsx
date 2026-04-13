@@ -328,7 +328,7 @@ export default function ChatPage() {
         setTechStackPreferences(data.tech_stack_preferences)
       }
       // Show tech stack picker in MODEL_DESIGN when not yet confirmed
-      if (data.phase === 'MODEL_DESIGN' && !data.tech_stack_preferences?.confirmed) {
+      if (data.phase === 'MODEL_DESIGN' && data.tech_stack_preferences && !data.tech_stack_preferences.confirmed) {
         setShowTechStackPicker(true)
       } else {
         setShowTechStackPicker(false)

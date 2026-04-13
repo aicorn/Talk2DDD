@@ -160,7 +160,7 @@ class TechProficiency(str, Enum):
 
 class TechChoice(BaseModel):
     name: str
-    category: str = ""
+    category: str = "custom"
     version: Optional[str] = None
     reason: Optional[str] = None
     proficiency: TechProficiency = TechProficiency.FAMILIAR

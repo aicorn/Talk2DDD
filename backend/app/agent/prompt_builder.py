@@ -292,7 +292,7 @@ class PromptBuilder:
                             f"  • {label}：{c.name}{ver} [{source}{prof}{reason}]"
                         )
             lines.append(
-                "约束：标注「用户指定」的技术项必须采用，不可替换。"
+                "约束：标注「用户指定」的技术项必须采用，不可替换。 "
                 "熟悉程度为 LEARNING 或 UNFAMILIAR 的技术需在文档中补充学习资源或替代方案。"
             )
         lines.append("[/TECH_STACK_BLOCK]")
