@@ -145,8 +145,30 @@ class KnowledgeExtractor:
             if elem is None:
                 continue
             q_id = (elem.get("id") or "").strip()
+            answered = (elem.get("answered") or "false").lower() == "true"
             question = (elem.text or "").strip()
+
+            # If answered="true", mark the matching question as resolved
+            if answered:
+                # Look up by ID first, then fall back to question text
+                match = None
+                if q_id:
+                    match = next(
+                        (q for q in ctx.clarification_queue if q.id == q_id), None
+                    )
+                if match is None and question:
+                    match = next(
+                        (q for q in ctx.clarification_queue if q.question == question),
+                        None,
+                    )
+                if match:
+                    match.answered = True
+                continue
+
+            # New question — skip if no text or already present (by ID or text)
             if not question:
+                continue
+            if q_id and any(q.id == q_id for q in ctx.clarification_queue):
                 continue
             if any(q.question == question for q in ctx.clarification_queue):
                 continue

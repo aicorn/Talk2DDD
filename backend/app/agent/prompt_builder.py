@@ -32,6 +32,9 @@ _XML_EXTRACTION_FORMAT = """【结构化提取规则】
 需要澄清时：
 <clarification id="Q001">澄清问题</clarification>
 
+问题已在对话中得到明确答案时，标记为已解决：
+<clarification id="Q001" answered="true"/>
+
 识别到项目基本信息时：
 <project_info name="项目名称" domain="领域背景描述"/>
 
@@ -217,9 +220,11 @@ class PromptBuilder:
             f"{c.name}({c.concept_type.value})" for c in dk.domain_concepts[:10]
         )
 
-        pending = [q.question for q in ctx.clarification_queue if not q.answered]
+        pending_qs = [q for q in ctx.clarification_queue if not q.answered]
         pending_str = (
-            "\n".join(f"  - {q}" for q in pending[:3]) if pending else "  无"
+            "\n".join(f"  - [{q.id}] {q.question}" for q in pending_qs[:3])
+            if pending_qs
+            else "  无"
         )
 
         recent_changes = ctx.requirement_changes[-3:]

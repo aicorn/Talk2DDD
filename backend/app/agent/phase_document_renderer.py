@@ -82,10 +82,13 @@ class PhaseDocumentRenderer:
             lines.append("_暂未收集到业务场景，请继续对话。_\n")
 
         pending = [q for q in ctx.clarification_queue if not q.answered]
-        if pending:
+        answered = [q for q in ctx.clarification_queue if q.answered]
+        if pending or answered:
             lines.append("## 待澄清问题\n")
             for q in pending:
                 lines.append(f"- [ ] {q.id}: {q.question}")
+            for q in answered:
+                lines.append(f"- [x] ~~{q.id}: {q.question}~~")
             lines.append("")
 
         return "\n".join(lines)
