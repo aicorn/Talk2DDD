@@ -16,6 +16,7 @@ from app.agent.context import (
     Phase,
     PHASE_LABELS,
     PHASE_PROGRESS,
+    TechStackPreferences,
 )
 from app.agent.context_manager import ContextManager
 from app.agent.document_pipeline import DocumentGenerationPipeline
@@ -49,6 +50,7 @@ class AgentResponse:
     stale_documents: List[str]
     pending_documents: List[str]
     phase_document: Optional[PhaseDocumentResult]
+    tech_stack_preferences: Optional[Dict[str, Any]] = None
 
 
 # Phase-specific follow-up suggestions shown to the user
@@ -71,6 +73,7 @@ _PHASE_SUGGESTIONS: dict[Phase, List[str]] = {
     ],
     Phase.MODEL_DESIGN: [
         "这些概念是否应该归属同一个聚合？",
+        "输入 /techstack 设置技术栈偏好",
         "输入 /next 进入文档生成阶段",
         "输入 /generate 直接生成文档",
     ],
@@ -163,7 +166,12 @@ class AgentCore:
         ai_reply = await chat_completion(messages=messages, provider=provider)
 
         # 5. Extract knowledge from AI reply
+        prev_ts_confirmed = ctx.tech_stack_preferences.confirmed
         self._knowledge_extractor.extract(ai_reply, ctx)
+
+        # 5b. If tech stack just got confirmed/changed, mark TECH_ARCHITECTURE as stale
+        if ctx.tech_stack_preferences.confirmed and not prev_ts_confirmed:
+            ctx.mark_documents_stale(["TECH_ARCHITECTURE"])
 
         # 6. Re-evaluate phase transition post-extraction (knowledge may satisfy exit cond)
         if phase_transition_reason == "":
@@ -209,6 +217,7 @@ class AgentCore:
             stale_documents=ctx.get_stale_documents(),
             pending_documents=self._pending_document_types(ctx),
             phase_document=phase_doc,
+            tech_stack_preferences=self._format_tech_stack(ctx),
         )
 
     async def generate_document(
@@ -411,6 +420,7 @@ class AgentCore:
             stale_documents=ctx.get_stale_documents(),
             pending_documents=self._pending_document_types(ctx),
             phase_document=phase_doc,
+            tech_stack_preferences=self._format_tech_stack(ctx),
         )
 
     def _format_concepts(self, ctx: AgentContext) -> List[Dict[str, Any]]:
@@ -446,3 +456,20 @@ class AgentCore:
             for dt in DocumentType
             if dt.value not in generated_types
         ]
+
+    def _format_tech_stack(self, ctx: AgentContext) -> Optional[Dict[str, Any]]:
+        """Return a serialisable dict of tech stack preferences, or None if empty."""
+        ts = ctx.tech_stack_preferences
+        if not ts.confirmed and ts.is_empty():
+            return None
+        return {
+            "confirmed": ts.confirmed,
+            "skipped": ts.skipped,
+            "summary": ts.summary(),
+            "frontend": [c.model_dump() for c in ts.frontend],
+            "backend": [c.model_dump() for c in ts.backend],
+            "database": [c.model_dump() for c in ts.database],
+            "infrastructure": [c.model_dump() for c in ts.infrastructure],
+            "messaging": [c.model_dump() for c in ts.messaging],
+            "custom": [c.model_dump() for c in ts.custom],
+        }

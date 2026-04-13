@@ -48,6 +48,7 @@ class AgentChatResponse(BaseModel):
     stale_documents: List[str] = Field(default_factory=list)
     pending_documents: List[str] = Field(default_factory=list)
     phase_document: Optional[PhaseDocumentSchema] = None
+    tech_stack_preferences: Optional[Dict[str, Any]] = None
 
 
 class GenerateDocumentRequest(BaseModel):
@@ -82,6 +83,7 @@ class AgentContextResponse(BaseModel):
     requirement_changes: List[Dict[str, Any]]
     generated_documents: List[Dict[str, Any]]
     stale_documents: List[str]
+    tech_stack_preferences: Optional[Dict[str, Any]] = None
 
 
 class RequirementChangesResponse(BaseModel):

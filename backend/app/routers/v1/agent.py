@@ -155,6 +155,7 @@ async def agent_chat(
         stale_documents=result.stale_documents,
         pending_documents=result.pending_documents,
         phase_document=phase_doc,
+        tech_stack_preferences=result.tech_stack_preferences,
     )
 
 
@@ -225,6 +226,20 @@ async def get_context(
     """Return the current AgentContext for a session."""
     ctx = await _context_manager.load(session_id, db)
     phase = ctx.current_phase
+    ts = ctx.tech_stack_preferences
+    tech_stack_data = None
+    if ts.confirmed or not ts.is_empty():
+        tech_stack_data = {
+            "confirmed": ts.confirmed,
+            "skipped": ts.skipped,
+            "summary": ts.summary(),
+            "frontend": [c.model_dump() for c in ts.frontend],
+            "backend": [c.model_dump() for c in ts.backend],
+            "database": [c.model_dump() for c in ts.database],
+            "infrastructure": [c.model_dump() for c in ts.infrastructure],
+            "messaging": [c.model_dump() for c in ts.messaging],
+            "custom": [c.model_dump() for c in ts.custom],
+        }
     return AgentContextResponse(
         session_id=session_id,
         project_id=ctx.project_id,
@@ -240,6 +255,7 @@ async def get_context(
             d.model_dump(mode="json") for d in ctx.generated_documents
         ],
         stale_documents=ctx.get_stale_documents(),
+        tech_stack_preferences=tech_stack_data,
     )
 
 

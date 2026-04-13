@@ -153,6 +153,40 @@ class PhaseDocumentRenderer:
                 )
             lines.append("")
 
+        ts = ctx.tech_stack_preferences
+        if ts.confirmed or not ts.is_empty():
+            lines.append("## 技术栈偏好\n")
+            if ts.skipped:
+                lines.append("_用户跳过技术栈选择，由 AI 根据领域模型自动推荐。_\n")
+            else:
+                _LABEL = {
+                    "frontend": "前端",
+                    "backend": "后端",
+                    "database": "数据库",
+                    "infrastructure": "基础设施",
+                    "messaging": "消息队列",
+                    "custom": "其他",
+                }
+                has_any = False
+                for category, label in _LABEL.items():
+                    choices = getattr(ts, category)
+                    if choices:
+                        has_any = True
+                        names = "、".join(
+                            c.name + (f" ({c.version})" if c.version else "")
+                            for c in choices
+                        )
+                        lines.append(f"- **{label}**：{names}")
+                if not has_any:
+                    lines.append("_技术栈信息采集中…_")
+                lines.append("")
+        elif ctx.current_phase.value == "MODEL_DESIGN":
+            lines.append("## 技术栈偏好\n")
+            lines.append(
+                "_尚未采集。模型确认后 AI 将引导您选择技术栈，"
+                "或输入 `/techstack` 随时触发。_\n"
+            )
+
         return "\n".join(lines)
 
     def _render_doc_generate(self, ctx: AgentContext) -> str:

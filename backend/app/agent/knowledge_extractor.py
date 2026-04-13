@@ -15,6 +15,8 @@ from app.agent.context import (
     DomainConcept,
     RequirementChange,
     ScenarioStatus,
+    TechChoice,
+    TechProficiency,
 )
 
 
@@ -42,6 +44,7 @@ class KnowledgeExtractor:
         self._extract_scenarios(ai_reply, ctx)
         self._extract_clarifications(ai_reply, ctx)
         self._extract_requirement_changes(ai_reply, ctx)
+        self._extract_tech_stack(ai_reply, ctx)
 
     # ------------------------------------------------------------------
     # Private extraction helpers
@@ -220,3 +223,63 @@ class KnowledgeExtractor:
                 "REQUIREMENT",
             }:
                 ctx.phase_before_change = ctx.current_phase
+
+    def _extract_tech_stack(self, text: str, ctx: AgentContext) -> None:
+        """Parse <tech_stack> tags and update ctx.tech_stack_preferences in-place."""
+        for raw in _extract_raw_tags(text, "tech_stack"):
+            elem = _safe_parse_xml(raw)
+            if elem is None:
+                continue
+            skipped_str = (elem.get("skipped") or "false").lower()
+            skipped = skipped_str == "true"
+            if skipped:
+                ctx.tech_stack_preferences.skipped = True
+                ctx.tech_stack_preferences.confirmed = True
+                return
+
+            _VALID_CATEGORIES = {
+                "frontend", "backend", "database",
+                "infrastructure", "messaging", "custom",
+            }
+            for tech_elem in elem.findall("tech"):
+                name = (tech_elem.get("name") or "").strip()
+                if not name:
+                    continue
+                category = (tech_elem.get("category") or "custom").lower().strip()
+                if category not in _VALID_CATEGORIES:
+                    category = "custom"
+                version = (tech_elem.get("version") or "").strip() or None
+                reason = (tech_elem.text or "").strip() or None
+                proficiency_str = (
+                    tech_elem.get("proficiency") or "FAMILIAR"
+                ).upper()
+                try:
+                    proficiency = TechProficiency(proficiency_str)
+                except ValueError:
+                    proficiency = TechProficiency.FAMILIAR
+
+                target_list: list = getattr(
+                    ctx.tech_stack_preferences, category
+                )
+                existing = next(
+                    (c for c in target_list if c.name.lower() == name.lower()),
+                    None,
+                )
+                if existing:
+                    if version:
+                        existing.version = version
+                    if reason:
+                        existing.reason = reason
+                    existing.proficiency = proficiency
+                else:
+                    target_list.append(
+                        TechChoice(
+                            name=name,
+                            category=category,
+                            version=version,
+                            reason=reason,
+                            proficiency=proficiency,
+                        )
+                    )
+
+            ctx.tech_stack_preferences.confirmed = True
