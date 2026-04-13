@@ -209,18 +209,10 @@ class AgentCore:
         if ctx.tech_stack_preferences.confirmed and not prev_ts_confirmed:
             ctx.mark_documents_stale(["TECH_ARCHITECTURE"])
 
-        # 6. Re-evaluate phase transition post-extraction (knowledge may satisfy exit cond)
-        if phase_transition_reason == "":
-            post_phase = self._phase_engine.evaluate(ctx, "")
-            if post_phase and post_phase != ctx.current_phase:
-                self._phase_engine.advance_phase(
-                    ctx, post_phase, f"exit-condition: {ctx.current_phase.value}"
-                )
-
-        # 7. Increment turn counter
+        # 6. Increment turn counter
         ctx.turn_count += 1
 
-        # 8. Render phase document
+        # 7. Render phase document
         phase_doc_content = self._doc_renderer.render(ctx)
         phase_doc_title = self._doc_renderer.get_title(ctx)
         phase_doc = PhaseDocumentResult(
@@ -231,16 +223,16 @@ class AgentCore:
             turn_count=ctx.turn_count,
         )
 
-        # 9. Persist context and conversation messages
+        # 8. Persist context and conversation messages
         await self._context_manager.save(ctx, db)
         await self._context_manager.append_messages(session_id, message, ai_reply, db)
 
-        # 10. Trigger async memory compression if threshold reached (Layer 2).
+        # 9. Trigger async memory compression if threshold reached (Layer 2).
         #     The background task opens its own DB session so the request-scoped
         #     session (now committed) is never touched after this point.
         await self._memory_manager.maybe_compress(ctx, provider=provider)
 
-        # 11. Build response
+        # 10. Build response
         return AgentResponse(
             reply=ai_reply,
             session_id=session_id,

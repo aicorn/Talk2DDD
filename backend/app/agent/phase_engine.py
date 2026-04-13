@@ -11,27 +11,6 @@ from app.agent.context import (
     PHASE_ORDER,
 )
 
-# Exit-condition lambdas for each phase
-_EXIT_CONDITIONS = {
-    Phase.ICEBREAK: lambda ctx: bool(
-        ctx.domain_knowledge.project_name and ctx.domain_knowledge.domain_description
-    ),
-    Phase.REQUIREMENT: lambda ctx: len(
-        [
-            s
-            for s in ctx.domain_knowledge.business_scenarios
-            if s.status.value != "DEPRECATED"
-        ]
-    )
-    >= 3,
-    Phase.DOMAIN_EXPLORE: lambda ctx: len(ctx.domain_knowledge.domain_concepts) >= 5,
-    Phase.MODEL_DESIGN: lambda ctx: len(ctx.domain_knowledge.bounded_contexts) >= 1,
-    Phase.DOC_GENERATE: lambda ctx: any(
-        d.status.value == "CURRENT" for d in ctx.generated_documents
-    ),
-    Phase.REVIEW_REFINE: lambda ctx: False,  # only manual completion
-}
-
 # Phases where requirement-change rollback is allowed
 _ROLLBACK_ENABLED_PHASES = {
     Phase.DOMAIN_EXPLORE,
@@ -89,10 +68,6 @@ class PhaseEngine:
             ctx.tech_stack_preferences.skipped = False
             # Jump to MODEL_DESIGN so the tech stack instructions are active
             return Phase.MODEL_DESIGN
-
-        # Automatic exit-condition check
-        if _EXIT_CONDITIONS[ctx.current_phase](ctx):
-            return self._next_phase(ctx)
 
         # Requirement-change rollback (P3–P6 only)
         if ctx.current_phase in _ROLLBACK_ENABLED_PHASES:
