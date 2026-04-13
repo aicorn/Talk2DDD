@@ -9,7 +9,7 @@ import { getAuthHeaders } from '@/lib/auth'
 type Provider = 'openai' | 'deepseek' | 'minimax'
 
 interface Message {
-  role: 'user' | 'assistant'
+  role: 'user' | 'assistant' | 'system'
   content: string
 }
 
@@ -33,6 +33,7 @@ interface AgentChatResponse {
   pending_documents: string[]
   phase_document: PhaseDocument | null
   tech_stack_preferences: TechStackPreferences | null
+  phase_changed?: boolean
 }
 
 interface TechChoice {
@@ -214,6 +215,7 @@ export default function ChatPage() {
   const [generatingDoc, setGeneratingDoc] = useState<string | null>(null)
   const [techStackPreferences, setTechStackPreferences] = useState<TechStackPreferences | null>(null)
   const [showTechStackPicker, setShowTechStackPicker] = useState(false)
+  const [phaseChanging, setPhaseChanging] = useState(false)
 
   // Auth guard: redirect to /login when no token is present
   useEffect(() => {
@@ -416,6 +418,62 @@ export default function ChatPage() {
     }
   }
 
+  async function switchPhase(direction: 'next' | 'back') {
+    if (phaseChanging || loading) return
+    setPhaseChanging(true)
+    setError(null)
+
+    try {
+      const res = await fetch(`${API_URL}/api/v1/agent/switch-phase`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders(),
+        },
+        body: JSON.stringify({ session_id: sessionId, direction, provider }),
+      })
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.detail ?? `HTTP ${res.status}`)
+      }
+
+      const data: AgentChatResponse = await res.json()
+
+      // Insert a system notification banner followed by the AI intro message
+      const phaseLabel = data.phase_label ?? data.phase
+      const systemNotice: Message = {
+        role: 'system',
+        content: `🔄 已切换至「${phaseLabel}」阶段`,
+      }
+      const aiMsg: Message = { role: 'assistant', content: data.reply }
+      setMessages((prev) => [...prev, systemNotice, aiMsg])
+
+      // Update phase state
+      setPhase(data.phase)
+      setProgress(data.progress)
+      setSuggestions(data.suggestions ?? [])
+      setPendingDocuments(data.pending_documents ?? [])
+      if (data.tech_stack_preferences !== undefined) {
+        setTechStackPreferences(data.tech_stack_preferences)
+      }
+      if (data.phase === 'MODEL_DESIGN' && data.tech_stack_preferences && !data.tech_stack_preferences.confirmed) {
+        setShowTechStackPicker(true)
+      } else {
+        setShowTechStackPicker(false)
+      }
+      // Update the phase document panel
+      if (data.phase_document) {
+        setPhaseDocument(data.phase_document)
+        setShowPhaseDoc(true)
+      }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : '阶段切换失败，请重试')
+    } finally {
+      setPhaseChanging(false)
+    }
+  }
+
   const phaseIndex = PHASE_KEYS.indexOf(phase as (typeof PHASE_KEYS)[number])
 
   return (
@@ -442,6 +500,17 @@ export default function ChatPage() {
 
       {/* Phase navigation bar */}
       <div className="flex items-center gap-1.5 px-4 py-2 bg-gray-50 border-b overflow-x-auto shrink-0" aria-label="phase navigation">
+        {/* Previous phase button */}
+        <button
+          onClick={() => switchPhase('back')}
+          disabled={phaseChanging || loading || phaseIndex === 0}
+          className="shrink-0 flex items-center gap-1 px-2.5 py-1 text-xs rounded-lg bg-white border border-gray-300 text-gray-600 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed"
+          aria-label="上一阶段"
+          title="切换到上一阶段"
+        >
+          {phaseChanging ? '⏳' : '←'} 上一阶段
+        </button>
+
         {PHASE_KEYS.map((p, i) => (
           <span
             key={p}
@@ -456,6 +525,18 @@ export default function ChatPage() {
             P{i + 1} {PHASE_LABELS[p]}
           </span>
         ))}
+
+        {/* Next phase button */}
+        <button
+          onClick={() => switchPhase('next')}
+          disabled={phaseChanging || loading || phaseIndex === PHASE_KEYS.length - 1}
+          className="shrink-0 flex items-center gap-1 px-2.5 py-1 text-xs rounded-lg bg-white border border-gray-300 text-gray-600 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed"
+          aria-label="下一阶段"
+          title="切换到下一阶段"
+        >
+          下一阶段 {phaseChanging ? '⏳' : '→'}
+        </button>
+
         <div className="ml-auto flex items-center gap-2 shrink-0 pl-2">
           <div className="w-20 h-1.5 bg-gray-200 rounded-full overflow-hidden" aria-label="progress bar">
             <div
@@ -485,9 +566,22 @@ export default function ChatPage() {
             {messages.map((msg, i) => (
               <div
                 key={i}
-                className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                className={`flex ${
+                  msg.role === 'system'
+                    ? 'justify-center'
+                    : msg.role === 'user'
+                    ? 'justify-end'
+                    : 'justify-start'
+                }`}
               >
-                {msg.role === 'user' ? (
+                {msg.role === 'system' ? (
+                  // Phase-switch system notification banner
+                  <div className="w-full text-center py-1">
+                    <span className="inline-block px-4 py-1 text-xs text-blue-600 bg-blue-50 border border-blue-200 rounded-full font-medium">
+                      {msg.content}
+                    </span>
+                  </div>
+                ) : msg.role === 'user' ? (
                   <div className="max-w-[75%] rounded-lg px-4 py-2 text-sm bg-blue-600 text-white">
                     {msg.content}
                   </div>

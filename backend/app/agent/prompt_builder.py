@@ -151,11 +151,23 @@ _CHANGE_DETECTION_PHASES = {
     Phase.REVIEW_REFINE,
 }
 
+# ---------------------------------------------------------------------------
+# Phase-switch instruction block – appended when phase_switch_trigger=True
+# ---------------------------------------------------------------------------
+_PHASE_SWITCH_INSTRUCTION = """【阶段切换模式】
+本轮对话由用户手动切换阶段触发，而非普通对话输入。
+请生成一段简短友好的「阶段引导消息」（100~200 字），内容包括：
+1. 确认已进入的新阶段名称和总阶段序号（如「欢迎进入第 3 阶段：领域探索」）
+2. 用一句话说明本阶段的核心目标
+3. 简要总结上一阶段已完成的关键成果（如"已收集 4 个业务场景"）
+4. 提出 1~2 个本阶段的首要行动项或引导问题
+语气积极、简洁，避免重复已知信息，不要在回复中输出任何 XML 标记。"""
+
 
 class PromptBuilder:
     """Assembles the layered system prompt for the current phase and context."""
 
-    def build(self, ctx: AgentContext, memory_summary_block: str = "") -> str:
+    def build(self, ctx: AgentContext, memory_summary_block: str = "", phase_switch_trigger: bool = False) -> str:
         """Return the full system prompt string for this request.
 
         Args:
@@ -164,6 +176,9 @@ class PromptBuilder:
                 block produced by ``MemoryManager.get_summary_block(ctx)``.
                 Pass an empty string (the default) if no summary is available
                 yet (early turns) – the layer will simply be omitted.
+            phase_switch_trigger: When ``True``, append a ``[PHASE_SWITCH]``
+                instruction block that directs the AI to generate a structured
+                phase-intro message instead of continuing the previous topic.
         """
         layers = [
             _ROLE_DEFINITION,
@@ -172,6 +187,8 @@ class PromptBuilder:
             self._build_context_block(ctx),  # Layer 4 – structured knowledge
             _XML_EXTRACTION_FORMAT,         # Layers 5+6
         ]
+        if phase_switch_trigger:
+            layers.append(_PHASE_SWITCH_INSTRUCTION)
         return "\n\n---\n\n".join(layer.strip() for layer in layers if layer.strip())
 
     # ------------------------------------------------------------------

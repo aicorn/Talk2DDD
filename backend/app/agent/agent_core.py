@@ -51,6 +51,7 @@ class AgentResponse:
     pending_documents: List[str]
     phase_document: Optional[PhaseDocumentResult]
     tech_stack_preferences: Optional[Dict[str, Any]] = None
+    phase_changed: bool = False
 
 
 # Phase-specific follow-up suggestions shown to the user
@@ -95,6 +96,41 @@ _DOC_TYPE_LABELS: dict[str, str] = {
     "UBIQUITOUS_LANGUAGE": "通用语言术语表",
     "USE_CASES": "用例说明",
     "TECH_ARCHITECTURE": "技术架构建议",
+}
+
+# Per-phase trigger messages sent as the user turn when the user manually
+# switches phases.  These are internal system messages and are NOT persisted
+# to the user-visible message history.
+_PHASE_SWITCH_TRIGGERS: dict[Phase, str] = {
+    Phase.ICEBREAK: (
+        "[系统] 用户手动切换回「破冰引入」阶段（P1）。"
+        "请简短告知用户当前处于哪个阶段，说明此阶段的目标，并提出第一个引导问题。"
+    ),
+    Phase.REQUIREMENT: (
+        "[系统] 用户手动进入「需求收集」阶段（P2）。"
+        "请简短告知用户此阶段目标（梳理业务场景），总结已收集到的场景数量，"
+        "并引导用户继续补充或澄清下一个场景。"
+    ),
+    Phase.DOMAIN_EXPLORE: (
+        "[系统] 用户手动进入「领域探索」阶段（P3）。"
+        "请简短告知此阶段目标（识别领域概念、建立通用语言），总结已识别的概念，"
+        "并提出第一个领域探索问题。"
+    ),
+    Phase.MODEL_DESIGN: (
+        "[系统] 用户手动进入「模型设计」阶段（P4）。"
+        "请简短告知此阶段目标（设计聚合、划定限界上下文），总结已有概念，"
+        "并提出第一个聚合边界问题。"
+    ),
+    Phase.DOC_GENERATE: (
+        "[系统] 用户手动进入「文档生成」阶段（P5）。"
+        "请简短告知此阶段目标，列出可以生成的文档类型，"
+        "并引导用户通过页面按钮生成文档（勿在对话中输出文档全文）。"
+    ),
+    Phase.REVIEW_REFINE: (
+        "[系统] 用户手动进入「审阅完善」阶段（P6）。"
+        "请简短告知此阶段目标（审阅文档、收集反馈），"
+        "告知用户可以提出修改意见或用 /regenerate 重新生成某类文档。"
+    ),
 }
 
 # Matches "/generate [DOC_TYPE]" — these commands trigger the document pipeline
@@ -264,6 +300,108 @@ class AgentCore:
 
         await self._context_manager.save(ctx, db)
         return content, version_id, resolved_project_id
+
+    async def switch_phase(
+        self,
+        session_id: str,
+        direction: str,
+        db: AsyncSession,
+        provider: Optional[str] = None,
+    ) -> AgentResponse:
+        """Manually advance or retreat one phase, then generate a phase-intro message.
+
+        Args:
+            session_id: The conversation session UUID.
+            direction: ``"next"`` to advance one phase, ``"back"`` to retreat one.
+            db: Active database session.
+            provider: Optional AI provider override.
+
+        Raises:
+            ValueError: If *direction* is invalid or the session is already at the
+                boundary phase in the requested direction.
+        """
+        # 1. Load context
+        ctx = await self._context_manager.load(session_id, db)
+
+        # 2. Compute target phase
+        if direction == "next":
+            new_phase = self._phase_engine._next_phase(ctx)
+        elif direction == "back":
+            new_phase = self._phase_engine._prev_phase(ctx)
+        else:
+            raise ValueError(f"Invalid direction '{direction}'. Must be 'next' or 'back'.")
+
+        if new_phase is None:
+            raise ValueError(
+                f"Already at the {'last' if direction == 'next' else 'first'} phase "
+                f"({ctx.current_phase.value}); cannot navigate further."
+            )
+
+        # 3. Apply phase transition
+        reason = f"manual-switch ({direction}): {ctx.current_phase.value} → {new_phase.value}"
+        self._phase_engine.advance_phase(ctx, new_phase, reason)
+
+        # 4. Build system prompt with phase-switch instruction appended
+        summary_block = self._memory_manager.get_summary_block(ctx)
+        system_prompt = self._prompt_builder.build(
+            ctx,
+            memory_summary_block=summary_block,
+            phase_switch_trigger=True,
+        )
+
+        # 5. Retrieve immediate message history (Layer 1) and call AI
+        history = await self._memory_manager.get_messages_for_ai(ctx, db)
+        trigger_msg = _PHASE_SWITCH_TRIGGERS.get(
+            ctx.current_phase,
+            f"[系统] 用户切换到阶段 {ctx.current_phase.value}。",
+        )
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(history)
+        messages.append({"role": "user", "content": trigger_msg})
+
+        ai_reply = await chat_completion(messages=messages, provider=provider)
+
+        # 6. Extract any domain knowledge embedded in the AI reply
+        self._knowledge_extractor.extract(ai_reply, ctx)
+
+        # 7. Increment turn counter
+        ctx.turn_count += 1
+
+        # 8. Render the phase document for the new phase
+        phase_doc_content = self._doc_renderer.render(ctx)
+        phase_doc_title = self._doc_renderer.get_title(ctx)
+        phase_doc = PhaseDocumentResult(
+            phase=ctx.current_phase.value,
+            title=phase_doc_title,
+            content=phase_doc_content,
+            rendered_at=datetime.now(timezone.utc),
+            turn_count=ctx.turn_count,
+        )
+
+        # 9. Persist context and the AI reply (trigger message is an internal
+        #    system action and is not stored in user-visible history)
+        await self._context_manager.save(ctx, db)
+        await self._context_manager.append_assistant_only(session_id, ai_reply, db)
+
+        # 10. Async memory compression (does not block response)
+        await self._memory_manager.maybe_compress(ctx, provider=provider)
+
+        # 11. Build and return response
+        return AgentResponse(
+            reply=ai_reply,
+            session_id=session_id,
+            phase=ctx.current_phase.value,
+            phase_label=PHASE_LABELS.get(ctx.current_phase, ctx.current_phase.value),
+            progress=PHASE_PROGRESS.get(ctx.current_phase, 0.0),
+            suggestions=_PHASE_SUGGESTIONS.get(ctx.current_phase, []),
+            extracted_concepts=self._format_concepts(ctx),
+            requirement_changes=self._format_requirement_changes(ctx),
+            stale_documents=ctx.get_stale_documents(),
+            pending_documents=self._pending_document_types(ctx),
+            phase_document=phase_doc,
+            tech_stack_preferences=self._format_tech_stack(ctx),
+            phase_changed=True,
+        )
 
     async def _save_document_version(
         self,
