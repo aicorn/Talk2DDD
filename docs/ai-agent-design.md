@@ -1534,3 +1534,544 @@ AI:   已更新数据库偏好为 PostgreSQL。
 - 若用户明确表示"跳过"或"你帮我选"，立即调用 `confirm_tech_stack(skipped=true)`，不再追问。
 - 若用户未回应技术栈相关问题而直接说"生成文档"，Agent 同样触发 `confirm_tech_stack(skipped=true)` 并告知用户可通过 `/techstack` 补充。
 - P4 的退出条件不强依赖技术栈确认：只要领域模型草稿经用户确认，即可推进 P5。
+
+---
+
+## 18. 阶段手动导航机制（Phase Navigation Buttons）
+
+### 18.1 需求背景与设计目标
+
+现有设计通过斜线命令（`/next`、`/back`）支持阶段手动跳转，但这种方式对普通用户不够直观——用户需要知道命令存在，并手动输入。
+
+本节设计两个**显式导航按钮**（「⬅ 上一阶段」和「下一阶段 ➡」），让用户无需记忆命令即可自由切换阶段，同时：
+
+1. **右侧阶段文档随之切换** — 按钮触发阶段变更后，右侧文档面板立即展示新阶段的文档内容。
+2. **对话中自动发出阶段通知** — 聊天区域插入一条样式独特的「系统通知」气泡，说明已进入哪个新阶段。
+3. **AI 切换上下文并给出阶段引导** — AI Agent 自动感知新阶段，向用户讲解本阶段目标和首要行动，不再延续旧阶段的讨论方向。
+
+---
+
+### 18.2 整体交互流程
+
+```
+用户点击「下一阶段」或「上一阶段」按钮
+        │
+        ▼
+① 前端禁用按钮（防重复点击），显示 loading 状态
+        │
+        ▼
+② POST /api/v1/agent/switch-phase
+   { session_id, direction: "next" | "back", provider? }
+        │
+        ▼
+③ 后端：PhaseEngine 计算新阶段
+   若已是第一 / 最后阶段，返回 400（前端提前禁用可避免此情况）
+        │
+        ▼
+④ 后端：advance_phase() 写入 PhaseTransition 记录
+        │
+        ▼
+⑤ 后端：以新阶段系统提示 + 专用 phase_switch_trigger 指令
+   调用 AI，生成阶段引导消息（约 100~200 字）
+        │
+        ▼
+⑥ 后端：渲染新阶段文档（PhaseDocumentRenderer，无 AI 调用）
+        │
+        ▼
+⑦ 后端：将「切换触发」和「AI 引导消息」追加到 Message 表
+   （两条记录：role=system 触发消息 + role=assistant AI 引导）
+        │
+        ▼
+⑧ 后端返回响应（与 /chat 响应结构相同，含 reply、phase、
+   phase_label、progress、suggestions、phase_document）
+        │
+        ▼
+⑨ 前端：在聊天区注入「阶段切换」系统通知气泡（蓝色横幅）
+   + AI 引导消息气泡（assistant 气泡）
+        │
+        ▼
+⑩ 前端：更新阶段标签栏高亮、进度条、右侧文档面板
+   恢复按钮可点击状态
+```
+
+---
+
+### 18.3 UI 组件设计
+
+#### 18.3.1 按钮位置
+
+按钮位于**输入区上方、建议词条行的右侧**，与发送按钮同行（对话框右上角区域）：
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  [建议词 A] [建议词 B] [建议词 C]      ← 上一阶段  下一阶段 →  │
+│  ┌─────────────────────────────────┐  ┌──────┐           │
+│  │ 输入消息，按 Enter 发送…          │  │ 发送 │           │
+│  └─────────────────────────────────┘  └──────┘           │
+└──────────────────────────────────────────────────────────┘
+```
+
+按钮也可出现在阶段导航标签栏的两端：
+
+```
+[← 上一阶段]  [P1 破冰] [P2 需求★] [P3 探索] …  [下一阶段 →]   ████ 35%
+```
+
+两处都展示可覆盖更多操作习惯；实现时二选一即可，推荐**放在阶段导航标签栏两端**（视觉关联更强）。
+
+#### 18.3.2 按钮样式与状态
+
+| 状态 | 视觉样式 | 说明 |
+|------|---------|------|
+| 正常 | 灰底圆角按钮，有箭头图标 | 可点击 |
+| 禁用（首阶段/末阶段） | 半透明 + cursor-not-allowed | 「上一阶段」在 P1 时禁用；「下一阶段」在 P6 时禁用 |
+| 加载中 | 旋转 spinner 替代箭头，按钮禁用 | 等待 API 响应期间 |
+| Hover | 浅蓝色背景 | 提示可交互 |
+
+#### 18.3.3 阶段切换通知气泡
+
+在聊天历史中插入一种特殊样式的「系统通知」消息，区别于普通的用户/助手气泡：
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  ────────────── 🔄 已进入「领域探索」阶段（P3/6）─────────── │
+└─────────────────────────────────────────────────────────┘
+```
+
+- **样式**：水平居中，浅蓝色背景横幅，小号字体，无圆角气泡外框。
+- **内容**：「已进入「{阶段名}」阶段（P{N}/6）」。
+- **在 Message 表中不持久化**（`role=system` 仅前端本地渲染，不写入历史）；或写入一条 `role=system` 消息以便会话恢复时重现，实现时可按需选择。
+
+---
+
+### 18.4 新增 API 端点
+
+#### 18.4.1 端点定义
+
+```
+POST /api/v1/agent/switch-phase
+```
+
+**请求体：**
+```json
+{
+  "session_id": "uuid",           // 必填
+  "direction": "next",            // 必填："next" | "back"
+  "provider": "openai"            // 可选，覆盖默认 Provider
+}
+```
+
+**响应体**（与 `/chat` 结构相同，额外字段 `phase_changed: true`）：
+```json
+{
+  "reply": "欢迎进入「领域探索」阶段！…（AI 引导消息）",
+  "session_id": "uuid",
+  "phase": "DOMAIN_EXPLORE",
+  "phase_label": "领域探索",
+  "progress": 0.4,
+  "suggestions": [
+    "这些概念中哪些是核心业务对象？",
+    "有哪些重要的业务规则？",
+    "输入 /next 进入模型设计阶段"
+  ],
+  "extracted_concepts": [],
+  "requirement_changes": [],
+  "stale_documents": [],
+  "pending_documents": [],
+  "phase_document": {
+    "phase": "DOMAIN_EXPLORE",
+    "title": "领域概念词汇表",
+    "content": "# 领域概念词汇表\n\n...",
+    "rendered_at": "2024-01-01T11:00:00Z",
+    "turn_count": 8
+  },
+  "phase_changed": true           // 标识本次响应是阶段切换触发的
+}
+```
+
+**错误响应：**
+
+| HTTP 状态 | 场景 |
+|-----------|------|
+| 400 | `direction` 非法，或已在首/末阶段无法继续跳转 |
+| 502 | AI Provider 调用失败 |
+| 404 | session_id 不存在（尚未初始化对话） |
+
+#### 18.4.2 Schema 扩展
+
+在 `AgentChatResponse` Schema 中新增可选字段 `phase_changed: bool = False`，使前端能区分普通聊天回复与阶段切换回复（用于触发通知气泡渲染）。
+
+```python
+# app/schemas/agent.py 中扩展
+class AgentChatResponse(BaseModel):
+    ...
+    phase_changed: bool = False   # 新增：本次响应由阶段切换触发
+```
+
+---
+
+### 18.5 后端处理流程（AgentCore 扩展）
+
+在 `AgentCore` 中新增 `switch_phase()` 方法：
+
+```python
+async def switch_phase(
+    self,
+    session_id: str,
+    direction: str,          # "next" | "back"
+    db: AsyncSession,
+    provider: Optional[str] = None,
+) -> AgentResponse:
+    """Manually advance or rewind one phase, then generate a phase intro message."""
+
+    # 1. Load context
+    ctx = await self._context_manager.load(session_id, db)
+
+    # 2. Compute target phase
+    if direction == "next":
+        new_phase = self._phase_engine._next_phase(ctx)
+    elif direction == "back":
+        new_phase = self._phase_engine._prev_phase(ctx)
+    else:
+        raise ValueError(f"Invalid direction: {direction}")
+
+    if new_phase is None:
+        raise ValueError("Already at the boundary phase; cannot navigate further.")
+
+    # 3. Apply transition
+    reason = f"manual-switch ({direction}): {ctx.current_phase.value} → {new_phase.value}"
+    self._phase_engine.advance_phase(ctx, new_phase, reason)
+
+    # 4. Build phase-switch system prompt
+    #    Adds PHASE_SWITCH_TRIGGER block to tell the AI to generate a welcoming intro
+    summary_block = self._memory_manager.get_summary_block(ctx)
+    system_prompt = self._prompt_builder.build(
+        ctx,
+        memory_summary_block=summary_block,
+        phase_switch_trigger=True,          # ← 新参数
+    )
+
+    # 5. Call AI with trigger message
+    history = await self._memory_manager.get_messages_for_ai(ctx, db)
+    trigger_msg = _build_phase_switch_trigger(ctx.current_phase)
+    messages = [{"role": "system", "content": system_prompt}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": trigger_msg})
+    ai_reply = await chat_completion(messages=messages, provider=provider)
+
+    # 6. Extract knowledge (lightweight; phase switch rarely yields new concepts)
+    self._knowledge_extractor.extract(ai_reply, ctx)
+
+    # 7. Increment turn counter
+    ctx.turn_count += 1
+
+    # 8. Render phase document for new phase
+    phase_doc_content = self._doc_renderer.render(ctx)
+    phase_doc_title = self._doc_renderer.get_title(ctx)
+    phase_doc = PhaseDocumentResult(
+        phase=ctx.current_phase.value,
+        title=phase_doc_title,
+        content=phase_doc_content,
+        rendered_at=datetime.now(timezone.utc),
+        turn_count=ctx.turn_count,
+    )
+
+    # 9. Persist context + messages
+    await self._context_manager.save(ctx, db)
+    # Persist the trigger message (role=system) and AI reply (role=assistant)
+    await self._context_manager.append_messages(
+        session_id, trigger_msg, ai_reply, db, user_role="system"
+    )
+
+    # 10. Async memory compression
+    await self._memory_manager.maybe_compress(ctx, provider=provider)
+
+    # 11. Build response
+    return AgentResponse(
+        reply=ai_reply,
+        session_id=session_id,
+        phase=ctx.current_phase.value,
+        phase_label=PHASE_LABELS.get(ctx.current_phase, ctx.current_phase.value),
+        progress=PHASE_PROGRESS.get(ctx.current_phase, 0.0),
+        suggestions=_PHASE_SUGGESTIONS.get(ctx.current_phase, []),
+        extracted_concepts=self._format_concepts(ctx),
+        requirement_changes=self._format_requirement_changes(ctx),
+        stale_documents=ctx.get_stale_documents(),
+        pending_documents=self._pending_document_types(ctx),
+        phase_document=phase_doc,
+        tech_stack_preferences=self._format_tech_stack(ctx),
+        phase_changed=True,
+    )
+```
+
+辅助函数 `_build_phase_switch_trigger()` 生成触发消息（此消息只传给 AI，不展示给用户）：
+
+```python
+_PHASE_SWITCH_TRIGGERS: dict[Phase, str] = {
+    Phase.ICEBREAK:       "[系统] 用户手动切换回「破冰引入」阶段（P1）。请简短告知用户当前处于哪个阶段，说明此阶段的目标，并提出第一个引导问题。",
+    Phase.REQUIREMENT:    "[系统] 用户手动进入「需求收集」阶段（P2）。请简短告知用户此阶段目标（梳理业务场景），总结已收集到的场景数量，并引导用户继续补充或澄清下一个场景。",
+    Phase.DOMAIN_EXPLORE: "[系统] 用户手动进入「领域探索」阶段（P3）。请简短告知此阶段目标（识别领域概念、建立通用语言），总结已识别的概念，并提出第一个领域探索问题。",
+    Phase.MODEL_DESIGN:   "[系统] 用户手动进入「模型设计」阶段（P4）。请简短告知此阶段目标（设计聚合、划定限界上下文），总结已有概念，并提出第一个聚合边界问题。",
+    Phase.DOC_GENERATE:   "[系统] 用户手动进入「文档生成」阶段（P5）。请简短告知此阶段目标，列出可以生成的文档类型，并引导用户通过页面按钮生成文档（勿在对话中输出文档全文）。",
+    Phase.REVIEW_REFINE:  "[系统] 用户手动进入「审阅完善」阶段（P6）。请简短告知此阶段目标（审阅文档、收集反馈），告知用户可以提出修改意见或用 /regenerate 重新生成某类文档。",
+}
+
+def _build_phase_switch_trigger(phase: Phase) -> str:
+    return _PHASE_SWITCH_TRIGGERS.get(phase, f"[系统] 用户切换到阶段 {phase.value}。")
+```
+
+---
+
+### 18.6 PromptBuilder 扩展（phase_switch_trigger 参数）
+
+在 `PromptBuilder.build()` 中新增 `phase_switch_trigger: bool = False` 参数。当为 `True` 时，在系统提示中追加一个 `[PHASE_SWITCH]` 指令块，明确告知 AI 这是一次阶段切换而非普通对话：
+
+```python
+_PHASE_SWITCH_INSTRUCTION = """【阶段切换模式】
+本轮对话由用户手动切换阶段触发，而非普通对话输入。
+请生成一段简短友好的「阶段引导消息」（100~200 字），内容包括：
+1. 确认已进入的新阶段名称和总阶段序号（如「欢迎进入第 3 阶段：领域探索」）
+2. 用一句话说明本阶段的核心目标
+3. 简要总结上一阶段已完成的关键成果（如"已收集 4 个业务场景"）
+4. 提出 1~2 个本阶段的首要行动项或引导问题
+语气积极、简洁，避免重复已知信息，不要输出任何 XML 标记。"""
+```
+
+`build()` 修改：
+
+```python
+def build(
+    self,
+    ctx: AgentContext,
+    memory_summary_block: str = "",
+    phase_switch_trigger: bool = False,   # ← 新参数
+) -> str:
+    layers = [
+        _ROLE_DEFINITION,
+        _PHASE_INSTRUCTIONS.get(ctx.current_phase, ""),
+        memory_summary_block,
+        self._build_context_block(ctx),
+        _XML_EXTRACTION_FORMAT,
+    ]
+    if phase_switch_trigger:
+        layers.append(_PHASE_SWITCH_INSTRUCTION)   # 追加到最后，优先级最高
+    return "\n\n---\n\n".join(layer.strip() for layer in layers if layer.strip())
+```
+
+`[PHASE_SWITCH]` 指令放在所有层的末尾，使其在 AI 处理时具有最高的情境覆盖效果。
+
+---
+
+### 18.7 各阶段进入时的 AI 引导词模板
+
+AI 的具体回复由 AI Provider 生成，但设计期望的输出结构如下：
+
+| 进入阶段 | AI 引导消息结构示例 |
+|---------|-------------------|
+| P1 破冰引入 | "欢迎来到第 1 阶段：破冰引入！我的目标是帮你梳理项目背景。能先告诉我，你们正在做一个什么样的系统？主要解决什么业务问题？" |
+| P2 需求收集 | "现在进入第 2 阶段：需求收集。目前已收集到 {N} 个业务场景，我们来继续梳理。接下来还有哪些核心业务流程想补充，或者需要深入讨论某个已有场景？" |
+| P3 领域探索 | "进入第 3 阶段：领域探索。基于已有的 {N} 个业务场景，我们来提炼核心领域概念。「{概念示例}」这些词已经出现在你的描述中——它们是你们业务中的核心对象吗？能描述一下「{概念X}」在你们业务中的确切含义吗？" |
+| P4 模型设计 | "进入第 4 阶段：模型设计。我们已经识别了 {N} 个领域概念，现在来讨论它们的边界关系。「{概念A}」和「{概念B}」在你们的业务中，是否总是作为一个整体一起变化？" |
+| P5 文档生成 | "进入第 5 阶段：文档生成！领域模型已基本成型，可以开始生成正式文档了。你可以点击下方按钮生成：① 业务需求文档 ② 领域模型文档 ③ 通用语言术语表 ④ 用例说明 ⑤ 技术架构建议。建议从「业务需求文档」开始。" |
+| P6 审阅完善 | "进入第 6 阶段：审阅完善。请仔细阅读已生成的文档，如有需要修改的地方，直接告诉我（如「第2节的聚合边界有误，应该…」）。如需重新生成某类文档，输入 `/regenerate [文档类型]`。" |
+
+---
+
+### 18.8 前端实现细节
+
+#### 18.8.1 新增状态字段
+
+```typescript
+// 新增状态
+const [phaseChanging, setPhaseChanging] = useState(false)
+```
+
+`phaseChanging` 为 `true` 时，导航按钮全部禁用（防重复点击），且与 `loading` 互斥（一次只能进行一种操作）。
+
+#### 18.8.2 switchPhase 函数
+
+```typescript
+async function switchPhase(direction: 'next' | 'back') {
+  if (phaseChanging || loading) return
+  setPhaseChanging(true)
+  setError(null)
+
+  try {
+    const res = await fetch(`${API_URL}/api/v1/agent/switch-phase`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+      body: JSON.stringify({ session_id: sessionId, direction, provider }),
+    })
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      throw new Error(data.detail ?? `HTTP ${res.status}`)
+    }
+
+    const data: AgentChatResponse & { phase_changed?: boolean } = await res.json()
+
+    // 1. 插入「阶段切换」系统通知（本地，不写入 messages 持久化状态）
+    const phaseLabel = data.phase_label ?? data.phase
+    const systemNotice: Message = {
+      role: 'system',           // 新增 'system' role（前端专用，不发给后端）
+      content: `🔄 已切换至「${phaseLabel}」阶段`,
+    }
+    // 2. 插入 AI 引导消息
+    const aiMsg: Message = { role: 'assistant', content: data.reply }
+    setMessages((prev) => [...prev, systemNotice, aiMsg])
+
+    // 3. 更新阶段状态
+    setPhase(data.phase)
+    setProgress(data.progress)
+    setSuggestions(data.suggestions ?? [])
+    setPendingDocuments(data.pending_documents ?? [])
+    if (data.tech_stack_preferences !== undefined) {
+      setTechStackPreferences(data.tech_stack_preferences)
+    }
+    // 4. 更新阶段文档
+    if (data.phase_document) {
+      setPhaseDocument(data.phase_document)
+      setShowPhaseDoc(true)
+    }
+  } catch (err: unknown) {
+    setError(err instanceof Error ? err.message : '阶段切换失败，请重试')
+  } finally {
+    setPhaseChanging(false)
+  }
+}
+```
+
+#### 18.8.3 系统通知气泡渲染
+
+在消息列表渲染中增加对 `role === 'system'` 的处理：
+
+```tsx
+{messages.map((msg, i) => (
+  <div key={i} className={`flex ${
+    msg.role === 'user' ? 'justify-end' :
+    msg.role === 'system' ? 'justify-center' : 'justify-start'
+  }`}>
+    {msg.role === 'system' ? (
+      // 阶段切换横幅通知
+      <div className="w-full text-center py-1.5 px-3">
+        <span className="inline-block px-4 py-1 text-xs text-blue-600 bg-blue-50
+                         border border-blue-200 rounded-full font-medium">
+          {msg.content}
+        </span>
+      </div>
+    ) : msg.role === 'user' ? (
+      /* 用户气泡 */
+    ) : (
+      /* 助手气泡 */
+    )}
+  </div>
+))}
+```
+
+#### 18.8.4 导航按钮渲染
+
+```tsx
+{/* 阶段导航按钮 — 放在阶段导航标签栏两端 */}
+<button
+  onClick={() => switchPhase('back')}
+  disabled={phaseChanging || loading || phaseIndex === 0}
+  className="shrink-0 flex items-center gap-1 px-2.5 py-1 text-xs rounded-lg
+             bg-white border border-gray-300 text-gray-600 hover:bg-gray-100
+             disabled:opacity-40 disabled:cursor-not-allowed"
+  aria-label="上一阶段"
+>
+  {phaseChanging ? '⏳' : '←'} 上一阶段
+</button>
+
+{/* ... 阶段标签列表 ... */}
+
+<button
+  onClick={() => switchPhase('next')}
+  disabled={phaseChanging || loading || phaseIndex === PHASE_KEYS.length - 1}
+  className="shrink-0 flex items-center gap-1 px-2.5 py-1 text-xs rounded-lg
+             bg-white border border-gray-300 text-gray-600 hover:bg-gray-100
+             disabled:opacity-40 disabled:cursor-not-allowed"
+  aria-label="下一阶段"
+>
+  下一阶段 {phaseChanging ? '⏳' : '→'}
+</button>
+```
+
+---
+
+### 18.9 与 §13 更新点的对应关系
+
+§13 中描述的现有前端设计与本节扩展内容的关系：
+
+| §13 中的现有能力 | §18 的扩展/变更 |
+|----------------|---------------|
+| `/next`、`/back` 斜线命令 | 功能保留；按钮为其可视化替代，底层逻辑通过专用端点实现 |
+| 阶段标签栏（只读展示） | 在标签栏两端各加一个导航按钮；标签本身保持不可点击切换阶段（点击只用于切换右侧文档查看，不改变当前阶段） |
+| 右侧阶段文档面板 | 阶段切换后自动展示新阶段文档，无需用户手动刷新 |
+| 快捷建议词条 | 阶段切换后 `suggestions` 随新阶段更新，展示新阶段的行动建议 |
+| `loading` 状态 | 新增 `phaseChanging` 状态，两者互斥，避免并发操作 |
+
+> **注意**：阶段标签栏的标签点击（已在 §13.1 中设计为查看该阶段文档）与阶段导航按钮（改变当前阶段）是两个不同的操作，需在 UI 上有明显区分：
+> - **标签点击** → 右侧文档切换为该阶段文档（不改变 `phase` 状态，不触发 AI）
+> - **导航按钮点击** → 改变 `phase` 状态，触发 AI 生成引导消息，更新文档面板
+
+---
+
+### 18.10 边界条件与错误处理
+
+| 场景 | 处理方式 |
+|------|---------|
+| 已在 P1，点击「上一阶段」 | 按钮禁用，不可点击 |
+| 已在 P6，点击「下一阶段」 | 按钮禁用，不可点击 |
+| 并发：正在 loading（AI 回复中），点击导航 | 导航按钮全局禁用，与 `loading` 互斥 |
+| AI Provider 超时或错误 | 与 `/chat` 相同的错误处理，显示重试提示；阶段不变（未 persist） |
+| 切换后用户立即点击反方向按钮 | 正常处理，允许来回切换 |
+| session_id 尚未初始化（未发送任何消息） | 后端尝试加载 AgentContext，若 Conversation 不存在则 404；前端提示用户先发送一条消息初始化 |
+
+---
+
+### ADR-008：阶段切换——专用 API vs. 复用 /chat 端点
+
+**问题**：是新增 `POST /api/v1/agent/switch-phase` 端点，还是将按钮触发改写为向 `/chat` 发送 `/next` 或 `/back` 消息？
+
+**决策**：**新增专用端点**。
+
+| 方案 | 优点 | 缺点 | 结论 |
+|------|------|------|------|
+| 复用 /chat（发送 `/next`/`/back`） | 实现最简单，无需新端点 | 用户消息列表中会出现 `/next` 命令文本，影响可读性；无法区分「用户文字」和「系统操作」 | ⚠️ 可作为快速实现路径 |
+| 新增 /switch-phase 端点 | 前后端语义分离；响应体可携带 `phase_changed` 标志；触发消息不出现在用户气泡中；后续可独立扩展（如添加阶段切换鉴权、限流）| 需要新增端点和 Schema | ✅ 推荐方案 |
+
+**代价**：需要在 `AgentCore` 中新增 `switch_phase()` 方法，在 `PromptBuilder` 中增加 `phase_switch_trigger` 参数，并在路由层新增端点。复杂度增量可控。
+
+**快速实现路径（可选）**：若需要最小化改动快速验证效果，可先让按钮向 `/chat` 发送隐式触发消息（`[SYSTEM] /next`），前端过滤掉该消息不展示为用户气泡，待功能稳定后再迁移到专用端点。
+
+---
+
+## 19. §12 和 §15 更新
+
+### §12 补充：阶段切换接口
+
+在现有 §12 的 API 接口列表中，新增以下端点（完整规范见 §18.4）：
+
+```
+POST /api/v1/agent/switch-phase
+```
+
+**请求体：**
+```json
+{
+  "session_id": "uuid",
+  "direction": "next",
+  "provider": "openai"
+}
+```
+
+**响应体**：与 `/chat` 结构相同，额外包含 `phase_changed: true`。
+
+---
+
+### §15 补充：实现路线图新增里程碑
+
+| 里程碑 | 内容 | 优先级 |
+|--------|------|--------|
+| M16 | **阶段导航按钮**：前端「上一阶段/下一阶段」按钮 + `POST /api/v1/agent/switch-phase` 端点 + `phase_switch_trigger` 指令块 + 阶段切换系统通知气泡 | 🔴 高 |
