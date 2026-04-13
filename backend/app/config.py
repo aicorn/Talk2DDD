@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     # AI Provider selection: "openai", "deepseek", or "minimax"
     AI_PROVIDER: str = "openai"
 
+    # Timeout (seconds) for a single AI API request.
+    # On a timeout retry the value is automatically doubled.
+    AI_REQUEST_TIMEOUT: int = 120
+
     # OpenAI
     OPENAI_API_KEY: str = ""
     OPENAI_MODEL: str = "gpt-4"
