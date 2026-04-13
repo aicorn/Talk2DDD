@@ -118,6 +118,25 @@ class PhaseEngine:
     # Private helpers
     # ------------------------------------------------------------------
 
+    def get_adjacent_phase(self, ctx: AgentContext, direction: str) -> Optional[Phase]:
+        """Return the phase adjacent to the current one in *direction*.
+
+        Args:
+            ctx: Current agent context.
+            direction: ``"next"`` for the following phase, ``"back"`` for the previous.
+
+        Returns:
+            The target :class:`Phase`, or ``None`` if already at the boundary.
+
+        Raises:
+            ValueError: If *direction* is not ``"next"`` or ``"back"``.
+        """
+        if direction == "next":
+            return self._next_phase(ctx)
+        if direction == "back":
+            return self._prev_phase(ctx)
+        raise ValueError(f"Invalid direction '{direction}'. Must be 'next' or 'back'.")
+
     def _next_phase(self, ctx: AgentContext) -> Optional[Phase]:
         try:
             idx = PHASE_ORDER.index(ctx.current_phase)

@@ -323,13 +323,9 @@ class AgentCore:
         # 1. Load context
         ctx = await self._context_manager.load(session_id, db)
 
-        # 2. Compute target phase
-        if direction == "next":
-            new_phase = self._phase_engine._next_phase(ctx)
-        elif direction == "back":
-            new_phase = self._phase_engine._prev_phase(ctx)
-        else:
-            raise ValueError(f"Invalid direction '{direction}'. Must be 'next' or 'back'.")
+        # 2. Compute target phase via the public PhaseEngine method
+        new_phase = self._phase_engine.get_adjacent_phase(ctx, direction)
+        # get_adjacent_phase raises ValueError for invalid direction already
 
         if new_phase is None:
             raise ValueError(

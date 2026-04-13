@@ -505,10 +505,11 @@ export default function ChatPage() {
           onClick={() => switchPhase('back')}
           disabled={phaseChanging || loading || phaseIndex === 0}
           className="shrink-0 flex items-center gap-1 px-2.5 py-1 text-xs rounded-lg bg-white border border-gray-300 text-gray-600 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed"
-          aria-label="上一阶段"
+          aria-label={phaseChanging ? '切换阶段中，请稍候' : '上一阶段'}
+          aria-busy={phaseChanging}
           title="切换到上一阶段"
         >
-          {phaseChanging ? '⏳' : '←'} 上一阶段
+          {phaseChanging ? <span aria-hidden="true">⏳</span> : <span aria-hidden="true">←</span>} 上一阶段
         </button>
 
         {PHASE_KEYS.map((p, i) => (
@@ -531,10 +532,11 @@ export default function ChatPage() {
           onClick={() => switchPhase('next')}
           disabled={phaseChanging || loading || phaseIndex === PHASE_KEYS.length - 1}
           className="shrink-0 flex items-center gap-1 px-2.5 py-1 text-xs rounded-lg bg-white border border-gray-300 text-gray-600 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed"
-          aria-label="下一阶段"
+          aria-label={phaseChanging ? '切换阶段中，请稍候' : '下一阶段'}
+          aria-busy={phaseChanging}
           title="切换到下一阶段"
         >
-          下一阶段 {phaseChanging ? '⏳' : '→'}
+          下一阶段 {phaseChanging ? <span aria-hidden="true">⏳</span> : <span aria-hidden="true">→</span>}
         </button>
 
         <div className="ml-auto flex items-center gap-2 shrink-0 pl-2">
