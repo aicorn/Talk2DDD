@@ -152,6 +152,64 @@ class ClarificationQuestion(BaseModel):
     answered: bool = False
 
 
+class TechProficiency(str, Enum):
+    FAMILIAR = "FAMILIAR"
+    LEARNING = "LEARNING"
+    UNFAMILIAR = "UNFAMILIAR"
+
+
+class TechChoice(BaseModel):
+    name: str
+    category: str = "custom"
+    version: Optional[str] = None
+    reason: Optional[str] = None
+    proficiency: TechProficiency = TechProficiency.FAMILIAR
+
+
+class TechStackPreferences(BaseModel):
+    confirmed: bool = False
+    skipped: bool = False
+    frontend: List[TechChoice] = Field(default_factory=list)
+    backend: List[TechChoice] = Field(default_factory=list)
+    database: List[TechChoice] = Field(default_factory=list)
+    infrastructure: List[TechChoice] = Field(default_factory=list)
+    messaging: List[TechChoice] = Field(default_factory=list)
+    custom: List[TechChoice] = Field(default_factory=list)
+
+    def all_choices(self) -> List[TechChoice]:
+        return (
+            self.frontend
+            + self.backend
+            + self.database
+            + self.infrastructure
+            + self.messaging
+            + self.custom
+        )
+
+    def is_empty(self) -> bool:
+        return not self.all_choices()
+
+    def summary(self) -> str:
+        """Return a compact summary string for prompt injection."""
+        if self.skipped:
+            return "（用户跳过，由 AI 根据领域模型推荐）"
+        parts = []
+        _LABEL = {
+            "frontend": "前端",
+            "backend": "后端",
+            "database": "数据库",
+            "infrastructure": "基础设施",
+            "messaging": "消息队列",
+            "custom": "其他",
+        }
+        for category, label in _LABEL.items():
+            choices: List[TechChoice] = getattr(self, category)
+            if choices:
+                names = "、".join(c.name for c in choices)
+                parts.append(f"{label}：{names}")
+        return "；".join(parts) if parts else "（尚未采集）"
+
+
 class MemoryConfig(BaseModel):
     """Tunable parameters for the three-layer memory model."""
 
@@ -193,6 +251,9 @@ class AgentContext(BaseModel):
     requirement_changes: List[RequirementChange] = Field(default_factory=list)
     generated_documents: List[DocumentRef] = Field(default_factory=list)
     clarification_queue: List[ClarificationQuestion] = Field(default_factory=list)
+    tech_stack_preferences: TechStackPreferences = Field(
+        default_factory=TechStackPreferences
+    )
     turn_count: int = 0
 
     # ── Memory mechanism fields (§4.4 of ai-agent-design.md) ──────────────

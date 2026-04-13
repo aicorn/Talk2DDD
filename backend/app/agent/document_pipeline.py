@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from app.agent.context import AgentContext, DocumentType
+from app.agent.prompt_builder import PromptBuilder
 from app.services.ai_service import chat_completion
 
 _DOC_PROMPTS: dict[DocumentType, str] = {
@@ -65,7 +66,7 @@ _DOC_PROMPTS: dict[DocumentType, str] = {
 - 每个用例有明确的成功和失败路径
 - 标注关键业务规则""",
 
-    DocumentType.TECH_ARCHITECTURE: """请基于以下领域知识，生成一份技术架构建议文档（Markdown 格式）。
+    DocumentType.TECH_ARCHITECTURE: """请基于以下领域知识和技术栈偏好，生成一份技术架构建议文档（Markdown 格式）。
 
 文档结构：
 1. 架构原则
@@ -73,17 +74,21 @@ _DOC_PROMPTS: dict[DocumentType, str] = {
 3. 模块划分（按限界上下文划分微服务或模块）
 4. 数据持久化建议（每个聚合的存储策略）
 5. 集成方式（限界上下文之间的通信方式：同步/异步）
-6. 技术栈建议
+6. 技术栈选型（严格遵循 [TECH_STACK_BLOCK] 中用户指定的技术；对未指定分类给出推荐并说明原因）
 7. 部署建议
 
 要求：
 - 与领域模型保持一致
-- 说明各架构决策的业务理由""",
+- 说明各架构决策的业务理由
+- 如技术栈由 AI 推荐，需在每个选项后注明"（AI 推荐）"及推荐理由""",
 }
 
 
 class DocumentGenerationPipeline:
     """Generates a DDD document by building a specialized prompt and calling AI."""
+
+    def __init__(self) -> None:
+        self._prompt_builder = PromptBuilder()
 
     async def generate(
         self,
@@ -102,6 +107,12 @@ class DocumentGenerationPipeline:
         )
 
         user_prompt = f"{doc_prompt}\n\n## 领域知识摘要\n\n{context_summary}"
+
+        # Inject tech stack block for TECH_ARCHITECTURE documents
+        if document_type == DocumentType.TECH_ARCHITECTURE:
+            tech_block = self._prompt_builder.build_tech_stack_block(ctx)
+            if tech_block:
+                user_prompt += f"\n\n{tech_block}"
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -155,5 +166,9 @@ class DocumentGenerationPipeline:
             lines.append(f"\n**待澄清问题：**")
             for q in pending:
                 lines.append(f"- {q}")
+
+        ts = ctx.tech_stack_preferences
+        if ts.confirmed or not ts.is_empty():
+            lines.append(f"\n**技术栈偏好：** {ts.summary()}")
 
         return "\n".join(lines) if lines else "（领域知识尚在收集中）"

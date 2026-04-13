@@ -39,7 +39,13 @@ _XML_EXTRACTION_FORMAT = """【结构化提取规则】
 <requirement_change type="ADD|MODIFY|DEPRECATE" target_id="如有则填场景ID" trigger_rollback="true|false">
   <description>变更描述</description>
   <affected_documents>受影响文档类型（逗号分隔，如 BUSINESS_REQUIREMENT,USE_CASES）</affected_documents>
-</requirement_change>"""
+</requirement_change>
+
+确认技术栈偏好时（P4 阶段模型确认后）：
+<tech_stack skipped="false|true">
+  <tech category="frontend|backend|database|infrastructure|messaging|custom" name="技术名称" version="版本（可选）" proficiency="FAMILIAR|LEARNING|UNFAMILIAR">选择原因（可选）</tech>
+</tech_stack>
+如用户无偏好，使用 <tech_stack skipped="true"/> 即可。"""
 
 # ---------------------------------------------------------------------------
 # Layer 2 – Phase-specific instructions
@@ -86,16 +92,23 @@ _PHASE_INSTRUCTIONS: dict[Phase, str] = {
   • "取消"、"砍掉"、"不需要了"、"去掉" → type="DEPRECATE\"""",
 
     Phase.MODEL_DESIGN: """【当前阶段：模型设计 P4/6】
-目标：引导用户确定聚合边界和限界上下文划分
+目标：引导用户确定聚合边界和限界上下文划分，并在模型确认后询问技术栈偏好
 
 任务：
 1. 基于已识别的领域概念，讨论聚合边界
 2. 使用提问模板判断聚合："{概念A}" 和 "{概念B}" 是否总是一起变化？
 3. 讨论事务边界：哪些操作必须保持原子性？
 4. 划分限界上下文：不同团队负责哪些业务？
-5. 引导用户确认领域模型草稿，确认后提议进入文档生成阶段
+5. 引导用户确认领域模型草稿
+6. **模型确认后**，自然过渡询问技术栈偏好：
+   - "模型已经很清晰了！在生成技术架构文档前，想了解一下你们团队的技术偏好，这样推荐的方案会更贴合实际情况。前端框架有偏好吗？"
+   - 逐步询问：前端 → 后端 → 数据库 → 基础设施（可选）→ 消息队列（可选）
+   - 如果用户说"不懂"、"你帮我选"或"跳过"，使用 <tech_stack skipped="true"/> 标记并告知 AI 将自动推荐
+   - 确认完成后提议进入文档生成阶段
+7. 用户也可以随时输入 /techstack 重新发起技术栈确认
 
 输出领域模型草稿（文字描述 + 树形或列表结构）。
+技术栈确认后，嵌入 <tech_stack> 标记。
 
 【需求变更检测】（同 P3 阶段规则）""",
 
@@ -227,6 +240,60 @@ class PromptBuilder:
         lines.append(f"待澄清问题:\n{pending_str}")
         lines.append(f"近期需求变更:\n{changes_str}")
         lines.append(f"过期文档: {stale_str}")
+
+        ts = ctx.tech_stack_preferences
+        if ts.confirmed or not ts.is_empty():
+            lines.append(f"技术栈偏好: {ts.summary()}")
+
         lines.append("[/CONTEXT_BLOCK]")
 
+        return "\n".join(lines)
+
+    def build_tech_stack_block(self, ctx: AgentContext) -> str:
+        """Return a [TECH_STACK_BLOCK] for TECH_ARCHITECTURE document generation.
+
+        Returns an empty string when no preferences have been confirmed yet.
+        """
+        ts = ctx.tech_stack_preferences
+        if not ts.confirmed and ts.is_empty():
+            return ""
+
+        lines = ["[TECH_STACK_BLOCK]"]
+        if ts.skipped:
+            lines.append(
+                "用户技术栈偏好：未指定（用户请求 AI 根据领域模型自行推荐）"
+            )
+            lines.append(
+                "约束：请在文档中为每项技术选型提供充分的理由，并说明其与领域模型的关联。"
+            )
+        else:
+            lines.append("用户已确认的技术栈偏好（标注「用户指定」的项必须采用）：")
+            _LABEL = {
+                "frontend": "前端",
+                "backend": "后端",
+                "database": "数据库",
+                "infrastructure": "基础设施",
+                "messaging": "消息队列",
+                "custom": "其他",
+            }
+            for category, label in _LABEL.items():
+                choices = getattr(ts, category)
+                if choices:
+                    for c in choices:
+                        ver = f" ({c.version})" if c.version else ""
+                        source = "用户指定"
+                        prof = (
+                            f"，熟悉程度：{c.proficiency.value}"
+                            if c.proficiency.value != "FAMILIAR"
+                            else ""
+                        )
+                        reason = f"，说明：{c.reason}" if c.reason else ""
+                        lines.append(
+                            f"  • {label}：{c.name}{ver} [{source}{prof}{reason}]"
+                        )
+            lines.append(
+                "约束：标注「用户指定」的技术项必须采用，不可替换。 "
+                "熟悉程度为 LEARNING 或 UNFAMILIAR 的技术需在文档中补充学习资源或替代方案。"
+            )
+        lines.append("[/TECH_STACK_BLOCK]")
         return "\n".join(lines)

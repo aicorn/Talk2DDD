@@ -78,6 +78,17 @@ class PhaseEngine:
             return Phase.DOC_GENERATE
         if "/model" in msg_lower:
             return Phase.MODEL_DESIGN
+        if "/techstack" in msg_lower:
+            # "/techstack skip" — user explicitly skips tech stack selection
+            if "skip" in msg_lower:
+                ctx.tech_stack_preferences.skipped = True
+                ctx.tech_stack_preferences.confirmed = True
+                return None  # no phase change needed
+            # "/techstack" alone — reset so AI re-collects preferences
+            ctx.tech_stack_preferences.confirmed = False
+            ctx.tech_stack_preferences.skipped = False
+            # Jump to MODEL_DESIGN so the tech stack instructions are active
+            return Phase.MODEL_DESIGN
 
         # Automatic exit-condition check
         if _EXIT_CONDITIONS[ctx.current_phase](ctx):

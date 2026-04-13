@@ -32,6 +32,27 @@ interface AgentChatResponse {
   stale_documents: string[]
   pending_documents: string[]
   phase_document: PhaseDocument | null
+  tech_stack_preferences: TechStackPreferences | null
+}
+
+interface TechChoice {
+  name: string
+  category: string
+  version?: string
+  reason?: string
+  proficiency: 'FAMILIAR' | 'LEARNING' | 'UNFAMILIAR'
+}
+
+interface TechStackPreferences {
+  confirmed: boolean
+  skipped: boolean
+  summary: string
+  frontend: TechChoice[]
+  backend: TechChoice[]
+  database: TechChoice[]
+  infrastructure: TechChoice[]
+  messaging: TechChoice[]
+  custom: TechChoice[]
 }
 
 const PHASE_KEYS = [
@@ -119,6 +140,59 @@ function ThinkBlock({ thinking }: { thinking: string }) {
   )
 }
 
+const TECH_QUICK_PICKS: Record<string, string[]> = {
+  frontend: ['React', 'Vue 3', 'Angular', 'Next.js', '小程序', '无前端'],
+  backend: ['Java/Spring Boot', 'Python/FastAPI', 'Python/Django', 'Node.js/Express', 'Go', '.NET'],
+  database: ['PostgreSQL', 'MySQL', 'MongoDB', 'Oracle', 'SQLite', 'Redis'],
+  infrastructure: ['Docker', 'Kubernetes', '阿里云', 'AWS', 'GCP', '裸金属'],
+  messaging: ['Kafka', 'RabbitMQ', 'Redis Streams', '不需要'],
+}
+const TECH_CATEGORY_LABELS: Record<string, string> = {
+  frontend: '前端',
+  backend: '后端',
+  database: '数据库',
+  infrastructure: '基础设施',
+  messaging: '消息队列',
+}
+
+function TechStackPanel({
+  preferences,
+  onSelectQuickPick,
+  onSkip,
+}: {
+  preferences: TechStackPreferences | null
+  onSelectQuickPick: (text: string) => void
+  onSkip: () => void
+}) {
+  if (preferences?.confirmed) return null // already confirmed — don't show picker
+
+  return (
+    <div className="mb-2 border rounded-lg bg-blue-50 p-3 text-sm" aria-label="tech stack quick pick">
+      <p className="font-medium text-blue-700 mb-2">🛠️ 请选择你们的技术栈偏好（可点击快捷选项或直接输入）</p>
+      {Object.entries(TECH_QUICK_PICKS).map(([category, options]) => (
+        <div key={category} className="mb-1.5">
+          <span className="text-xs text-gray-500 mr-1">{TECH_CATEGORY_LABELS[category] ?? category}：</span>
+          {options.map((opt) => (
+            <button
+              key={opt}
+              onClick={() => onSelectQuickPick(`${TECH_CATEGORY_LABELS[category] ?? category}用 ${opt}`)}
+              className="mr-1 mb-1 px-2 py-0.5 text-xs rounded-full bg-white border border-blue-200 text-blue-700 hover:bg-blue-100"
+            >
+              {opt}
+            </button>
+          ))}
+        </div>
+      ))}
+      <button
+        onClick={onSkip}
+        className="mt-1 px-3 py-1 text-xs rounded-full bg-gray-100 border border-gray-300 text-gray-600 hover:bg-gray-200"
+      >
+        跳过，由 AI 帮我推荐
+      </button>
+    </div>
+  )
+}
+
 export default function ChatPage() {
   const router = useRouter()
   const [provider] = useState<Provider>(getStoredProvider)
@@ -138,6 +212,8 @@ export default function ChatPage() {
   const [showPhaseDoc, setShowPhaseDoc] = useState(false)
   const [pendingDocuments, setPendingDocuments] = useState<string[]>([])
   const [generatingDoc, setGeneratingDoc] = useState<string | null>(null)
+  const [techStackPreferences, setTechStackPreferences] = useState<TechStackPreferences | null>(null)
+  const [showTechStackPicker, setShowTechStackPicker] = useState(false)
 
   // Auth guard: redirect to /login when no token is present
   useEffect(() => {
@@ -248,6 +324,15 @@ export default function ChatPage() {
       setSuggestions(data.suggestions ?? [])
       setPendingDocuments(data.pending_documents ?? [])
       setLastFailedMessage(null)
+      if (data.tech_stack_preferences !== undefined) {
+        setTechStackPreferences(data.tech_stack_preferences)
+      }
+      // Show tech stack picker in MODEL_DESIGN when not yet confirmed
+      if (data.phase === 'MODEL_DESIGN' && data.tech_stack_preferences && !data.tech_stack_preferences.confirmed) {
+        setShowTechStackPicker(true)
+      } else {
+        setShowTechStackPicker(false)
+      }
       if (data.phase_document) {
         setPhaseDocument(data.phase_document)
         setShowPhaseDoc(true)
@@ -429,6 +514,15 @@ export default function ChatPage() {
               </div>
             )}
           </div>
+
+          {/* Tech stack quick-pick panel — shown in MODEL_DESIGN before confirmation */}
+          {showTechStackPicker && (
+            <TechStackPanel
+              preferences={techStackPreferences}
+              onSelectQuickPick={(text) => sendMessage(text)}
+              onSkip={() => sendMessage('/techstack skip')}
+            />
+          )}
 
           {/* Suggestion chips */}
           {suggestions.length > 0 && !loading && (
