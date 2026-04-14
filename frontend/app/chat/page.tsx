@@ -75,11 +75,33 @@ const THINK_PREVIEW_LEN = 60
 
 /**
  * Base timeout (ms) for frontend fetch calls to the agent API.
- * Slightly longer than the backend AI_REQUEST_TIMEOUT (120 s) to allow for
- * AI processing time plus network round-trip overhead.
- * On a timeout retry the value is automatically doubled (see retryLastMessage).
+ * Used for the initial POST /chat/async call; still doubled on timeout retry.
  */
 const FETCH_TIMEOUT_BASE_MS = 150_000 // 150 s
+
+/**
+ * Timeout (ms) for each individual GET /tasks/{id} poll request.
+ * Polls are lightweight so 30 s is more than sufficient.
+ */
+const POLL_REQUEST_TIMEOUT_MS = 30_000 // 30 s
+
+/**
+ * Interval (ms) between consecutive polls while a task is still pending.
+ */
+const POLL_INTERVAL_MS = 2_000 // 2 s
+
+/**
+ * Maximum total time (ms) the frontend will keep polling before giving up.
+ * Ten minutes should comfortably cover the longest AI responses.
+ */
+const MAX_POLLING_MS = 600_000 // 10 min
+
+interface TaskStatusResponse {
+  task_id: string
+  status: string // "pending" | "completed" | "failed"
+  result: AgentChatResponse | null
+  error: string | null
+}
 
 /**
  * Checks whether a failed API response is an authentication error (401/403).
@@ -110,6 +132,48 @@ async function fetchWithTimeout(
   } finally {
     clearTimeout(timer)
   }
+}
+
+/**
+ * Poll GET /tasks/{taskId} until the task completes, fails, or the total
+ * polling budget (MAX_POLLING_MS) is exhausted.
+ *
+ * The first poll fires immediately so that fast responses (e.g. in tests or
+ * when the backend is already done) are returned without any delay.
+ */
+async function pollTaskResult(taskId: string): Promise<AgentChatResponse> {
+  const deadline = Date.now() + MAX_POLLING_MS
+
+  while (Date.now() < deadline) {
+    const res = await fetchWithTimeout(
+      `${API_URL}/api/v1/agent/tasks/${taskId}`,
+      { headers: getAuthHeaders() },
+      POLL_REQUEST_TIMEOUT_MS,
+    )
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      throw new Error(parseApiError(res, data))
+    }
+
+    const statusData: TaskStatusResponse = await res.json()
+
+    if (statusData.status === 'completed' && statusData.result) {
+      return statusData.result
+    }
+
+    if (statusData.status === 'failed') {
+      throw new Error(statusData.error ?? '任务处理失败，请重试')
+    }
+
+    // Still pending — wait before the next poll
+    await new Promise<void>((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
+  }
+
+  throw new DOMException(
+    `轮询超时（等待 ${Math.round(MAX_POLLING_MS / 60_000)} 分钟无响应），请点击「重试」`,
+    'TimeoutError',
+  )
 }
 
 function getStoredProvider(): Provider {
@@ -334,8 +398,9 @@ export default function ChatPage() {
     setError(null)
 
     try {
-      const res = await fetchWithTimeout(
-        `${API_URL}/api/v1/agent/chat`,
+      // Step 1: submit the chat task and receive a task ID immediately.
+      const startRes = await fetchWithTimeout(
+        `${API_URL}/api/v1/agent/chat/async`,
         {
           method: 'POST',
           headers: {
@@ -347,12 +412,16 @@ export default function ChatPage() {
         fetchTimeoutMs.current,
       )
 
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}))
-        throw new Error(parseApiError(res, data))
+      if (!startRes.ok) {
+        const data = await startRes.json().catch(() => ({}))
+        throw new Error(parseApiError(startRes, data))
       }
 
-      const data: AgentChatResponse = await res.json()
+      const startData: { task_id: string; status: string } = await startRes.json()
+
+      // Step 2: poll until the task completes (or times out / fails).
+      const data: AgentChatResponse = await pollTaskResult(startData.task_id)
+
       setMessages([...next, { role: 'assistant', content: data.reply }])
       setPhase(data.phase)
       setProgress(data.progress)
@@ -377,7 +446,7 @@ export default function ChatPage() {
       const isTimeout =
         err instanceof DOMException && err.name === 'TimeoutError'
       const msg = isTimeout
-        ? `请求超时（等待 ${Math.round(fetchTimeoutMs.current / 1000)} 秒无响应），请点击「重试」`
+        ? err.message
         : err instanceof Error
           ? err.message
           : '发生未知错误，请重试'
