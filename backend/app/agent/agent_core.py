@@ -245,7 +245,7 @@ class AgentCore:
             )
             block_msg = (
                 f"[系统] 用户尝试进入下一阶段，但仍有 {pending_count} 个待澄清问题未解决。"
-                f"请明确提示用户必须先处理这些问题，再才能进入下一阶段。"
+                f"请明确提示用户必须先处理这些问题，才能进入下一阶段。"
                 f"当前待澄清问题列表：\n{pending_lines}"
             )
             summary_block = self._memory_manager.get_summary_block(ctx)
