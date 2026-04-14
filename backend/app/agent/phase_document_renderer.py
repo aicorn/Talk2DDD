@@ -56,6 +56,17 @@ class PhaseDocumentRenderer:
         )
         return "\n".join(lines)
 
+    def _render_clarification_section(self, ctx: AgentContext) -> list:
+        """Return lines for the '待澄清问题' section, or an empty list if none pending."""
+        pending = ctx.clarification_queue
+        if not pending:
+            return []
+        lines = ["## 待澄清问题\n"]
+        for q in pending:
+            lines.append(f"- [ ] {q.id}：{q.question}")
+        lines.append("")
+        return lines
+
     def _render_requirement(self, ctx: AgentContext) -> str:
         dk = ctx.domain_knowledge
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
@@ -78,15 +89,7 @@ class PhaseDocumentRenderer:
         else:
             lines.append("_暂未收集到业务场景，请继续对话。_\n")
 
-        pending = [q for q in ctx.clarification_queue if not q.answered]
-        answered = [q for q in ctx.clarification_queue if q.answered]
-        if pending or answered:
-            lines.append("## 待澄清问题\n")
-            for q in pending:
-                lines.append(f"- [ ] {q.id}: {q.question}")
-            for q in answered:
-                lines.append(f"- [x] ~~{q.id}: {q.question}~~")
-            lines.append("")
+        lines.extend(self._render_clarification_section(ctx))
 
         return "\n".join(lines)
 
@@ -110,6 +113,8 @@ class PhaseDocumentRenderer:
             lines.append("")
         else:
             lines.append("_暂未识别到领域概念，请继续对话。_\n")
+
+        lines.extend(self._render_clarification_section(ctx))
 
         return "\n".join(lines)
 
@@ -187,6 +192,8 @@ class PhaseDocumentRenderer:
                 "或输入 `/techstack` 随时触发。_\n"
             )
 
+        lines.extend(self._render_clarification_section(ctx))
+
         return "\n".join(lines)
 
     def _render_review_refine(self, ctx: AgentContext) -> str:
@@ -208,5 +215,7 @@ class PhaseDocumentRenderer:
             lines.append("")
         else:
             lines.append("_暂无需求变更记录。_\n")
+
+        lines.extend(self._render_clarification_section(ctx))
 
         return "\n".join(lines)

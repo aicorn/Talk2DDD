@@ -235,6 +235,64 @@ class AgentCore:
                 f"({ctx.current_phase.value}); cannot navigate further."
             )
 
+        # 2a. Block "next" navigation when there are unresolved clarification questions.
+        #     Users must resolve (answer or dismiss) all pending questions before
+        #     advancing to the next phase.  Retreating ("back") is always allowed.
+        if direction == "next" and ctx.clarification_queue:
+            pending_count = len(ctx.clarification_queue)
+            pending_lines = "\n".join(
+                f"- [{q.id}] {q.question}" for q in ctx.clarification_queue[:5]
+            )
+            block_msg = (
+                f"[系统] 用户尝试进入下一阶段，但仍有 {pending_count} 个待澄清问题未解决。"
+                f"请明确提示用户必须先处理这些问题，再才能进入下一阶段。"
+                f"当前待澄清问题列表：\n{pending_lines}"
+            )
+            summary_block = self._memory_manager.get_summary_block(ctx)
+            system_prompt = self._prompt_builder.build(
+                ctx, memory_summary_block=summary_block
+            )
+            history = await self._memory_manager.get_messages_for_ai(ctx, db)
+            messages = [{"role": "system", "content": system_prompt}]
+            messages.extend(history)
+            messages.append({"role": "user", "content": block_msg})
+            ai_reply = await chat_completion(messages=messages, provider=provider)
+
+            self._knowledge_extractor.extract(ai_reply, ctx)
+            ctx.turn_count += 1
+            phase_doc_content = self._doc_renderer.render(ctx)
+            phase_doc_title = self._doc_renderer.get_title(ctx)
+            phase_doc = PhaseDocumentResult(
+                phase=ctx.current_phase.value,
+                title=phase_doc_title,
+                content=phase_doc_content,
+                rendered_at=datetime.now(timezone.utc),
+                turn_count=ctx.turn_count,
+            )
+            await self._context_manager.save(ctx, db)
+            await self._context_manager.append_assistant_only(session_id, ai_reply, db)
+            await self._save_phase_document_to_project(
+                session_id=session_id,
+                ctx=ctx,
+                phase=ctx.current_phase,
+                content=phase_doc_content,
+                db=db,
+            )
+            await self._memory_manager.maybe_compress(ctx, provider=provider)
+            return AgentResponse(
+                reply=ai_reply,
+                session_id=session_id,
+                phase=ctx.current_phase.value,
+                phase_label=PHASE_LABELS.get(ctx.current_phase, ctx.current_phase.value),
+                progress=PHASE_PROGRESS.get(ctx.current_phase, 0.0),
+                suggestions=_PHASE_SUGGESTIONS.get(ctx.current_phase, []),
+                extracted_concepts=self._format_concepts(ctx),
+                requirement_changes=self._format_requirement_changes(ctx),
+                phase_document=phase_doc,
+                tech_stack_preferences=self._format_tech_stack(ctx),
+                phase_changed=False,
+            )
+
         # 3. Apply phase transition
         reason = f"manual-switch ({direction}): {ctx.current_phase.value} → {new_phase.value}"
         self._phase_engine.advance_phase(ctx, new_phase, reason)

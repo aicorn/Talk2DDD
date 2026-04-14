@@ -140,16 +140,38 @@ class KnowledgeExtractor:
                 )
 
     def _extract_clarifications(self, text: str, ctx: AgentContext) -> None:
+        # Handle self-closing resolution tags: <clarification id="Q001" answered="true"/>
+        # or <clarification id="Q001" dismissed="true"/>
+        # These don't have text content so _extract_raw_tags won't find them.
+        _SC_PATTERN = re.compile(
+            r'<clarification\s([^/]*?)/>', re.IGNORECASE | re.DOTALL
+        )
+        for sc_match in _SC_PATTERN.finditer(text):
+            attrs_str = sc_match.group(1)
+            q_id = ""
+            m = re.search(r'\bid=["\']([^"\']+)["\']', attrs_str)
+            if m:
+                q_id = m.group(1).strip()
+            answered = bool(re.search(r'\banswered=["\']true["\']', attrs_str, re.IGNORECASE))
+            dismissed = bool(re.search(r'\bdismissed=["\']true["\']', attrs_str, re.IGNORECASE))
+            if (answered or dismissed) and q_id:
+                match = next(
+                    (q for q in ctx.clarification_queue if q.id == q_id), None
+                )
+                if match:
+                    ctx.clarification_queue.remove(match)
+
         for raw in _extract_raw_tags(text, "clarification"):
             elem = _safe_parse_xml(raw)
             if elem is None:
                 continue
             q_id = (elem.get("id") or "").strip()
             answered = (elem.get("answered") or "false").lower() == "true"
+            dismissed = (elem.get("dismissed") or "false").lower() == "true"
             question = (elem.text or "").strip()
 
-            # If answered="true", mark the matching question as resolved
-            if answered:
+            # If answered="true" or dismissed="true", remove the question from the queue
+            if answered or dismissed:
                 # Look up by ID first, then fall back to question text
                 match = None
                 if q_id:
@@ -162,7 +184,7 @@ class KnowledgeExtractor:
                         None,
                     )
                 if match:
-                    match.answered = True
+                    ctx.clarification_queue.remove(match)
                 continue
 
             # New question — skip if no text or already present (by ID or text)
