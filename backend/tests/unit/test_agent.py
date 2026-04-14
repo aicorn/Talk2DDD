@@ -259,6 +259,88 @@ class TestKnowledgeExtractor:
         extractor.extract(reply, ctx)
         assert len(ctx.domain_knowledge.domain_concepts) == 0
 
+    # ------------------------------------------------------------------
+    # merge_scenarios_from_json tests
+    # ------------------------------------------------------------------
+
+    def test_merge_scenarios_from_json_adds_new_scenarios(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        json_text = '[{"id": "S001", "name": "用户注册", "description": "用户创建账号"}]'
+        added = extractor.merge_scenarios_from_json(json_text, ctx)
+        assert added == 1
+        assert len(ctx.domain_knowledge.business_scenarios) == 1
+        assert ctx.domain_knowledge.business_scenarios[0].name == "用户注册"
+        assert ctx.domain_knowledge.business_scenarios[0].id == "S001"
+
+    def test_merge_scenarios_from_json_no_duplicate_by_name(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        ctx.domain_knowledge.business_scenarios.append(
+            BusinessScenario(id="S001", name="用户注册", description="已有描述")
+        )
+        json_text = '[{"id": "S001", "name": "用户注册", "description": "另一描述"}]'
+        added = extractor.merge_scenarios_from_json(json_text, ctx)
+        assert added == 0
+        # Original description must not be overwritten
+        assert ctx.domain_knowledge.business_scenarios[0].description == "已有描述"
+
+    def test_merge_scenarios_from_json_supplements_empty_description(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        ctx.domain_knowledge.business_scenarios.append(
+            BusinessScenario(id="S001", name="用户注册", description="")
+        )
+        json_text = '[{"id": "S001", "name": "用户注册", "description": "用户创建账号"}]'
+        extractor.merge_scenarios_from_json(json_text, ctx)
+        assert ctx.domain_knowledge.business_scenarios[0].description == "用户创建账号"
+
+    def test_merge_scenarios_from_json_resolves_id_conflict(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        ctx.domain_knowledge.business_scenarios.append(
+            BusinessScenario(id="S001", name="用户注册", description="描述")
+        )
+        # Extractor returns a new scenario with a conflicting id
+        json_text = '[{"id": "S001", "name": "用户下单", "description": "下单流程"}]'
+        added = extractor.merge_scenarios_from_json(json_text, ctx)
+        assert added == 1
+        ids = [s.id for s in ctx.domain_knowledge.business_scenarios]
+        assert ids.count("S001") == 1  # no duplicate id
+
+    def test_merge_scenarios_from_json_handles_empty_array(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        added = extractor.merge_scenarios_from_json("[]", ctx)
+        assert added == 0
+        assert len(ctx.domain_knowledge.business_scenarios) == 0
+
+    def test_merge_scenarios_from_json_handles_invalid_json(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        added = extractor.merge_scenarios_from_json("not valid json at all", ctx)
+        assert added == 0
+        assert len(ctx.domain_knowledge.business_scenarios) == 0
+
+    def test_merge_scenarios_from_json_extracts_array_from_surrounding_text(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        json_text = (
+            '以下是提取的场景：\n'
+            '[{"id": "S001", "name": "商品搜索", "description": "用户搜索商品"}]\n'
+            '提取完毕。'
+        )
+        added = extractor.merge_scenarios_from_json(json_text, ctx)
+        assert added == 1
+        assert ctx.domain_knowledge.business_scenarios[0].name == "商品搜索"
+
+    def test_merge_scenarios_from_json_skips_items_without_name(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        json_text = '[{"id": "S001", "description": "没有名称的场景"}]'
+        added = extractor.merge_scenarios_from_json(json_text, ctx)
+        assert added == 0
+
 
 # ---------------------------------------------------------------------------
 # PromptBuilder tests
@@ -321,6 +403,41 @@ class TestPromptBuilder:
         )
         prompt = builder.build(ctx)
         assert "DOMAIN_MODEL" in prompt
+
+    def test_build_scenario_extraction_prompt_returns_string(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        prompt = builder.build_scenario_extraction_prompt(
+            ctx,
+            user_message="我们需要支持用户注册",
+            ai_reply="好的，用户注册是一个核心业务场景。",
+        )
+        assert isinstance(prompt, str)
+        assert len(prompt) > 50
+
+    def test_build_scenario_extraction_prompt_includes_existing_scenarios(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        ctx.domain_knowledge.business_scenarios.append(
+            BusinessScenario(id="S001", name="用户注册", description="用户创建账号")
+        )
+        prompt = builder.build_scenario_extraction_prompt(
+            ctx,
+            user_message="还有下单功能",
+            ai_reply="是的，用户下单也是重要场景。",
+        )
+        assert "S001" in prompt
+        assert "用户注册" in prompt
+
+    def test_build_scenario_extraction_prompt_instructs_json_output(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        prompt = builder.build_scenario_extraction_prompt(
+            ctx,
+            user_message="我们有一个报表功能",
+            ai_reply="好的，报表功能是一个场景。",
+        )
+        assert "JSON" in prompt
 
 
 # ---------------------------------------------------------------------------

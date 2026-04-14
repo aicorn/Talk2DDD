@@ -179,6 +179,69 @@ class KnowledgeExtractor:
                 ClarificationQuestion(id=auto_id, question=question)
             )
 
+    def merge_scenarios_from_json(self, json_text: str, ctx: AgentContext) -> int:
+        """Parse a JSON array of scenarios and merge them into *ctx* in-place.
+
+        This method is called after the dedicated scenario-extraction AI call
+        in Phase 2 to reconcile any scenarios that were discussed in the
+        conversation but not captured via ``<scenario>`` XML tags.
+
+        Returns the number of new scenarios added to the context.
+        """
+        import json as _json
+
+        # Tolerantly extract the outermost JSON array from the text by finding
+        # the first '[' and the last ']'.  This is more robust than a regex
+        # for arrays containing nested objects or brackets.
+        start = json_text.find("[")
+        end = json_text.rfind("]")
+        if start == -1 or end == -1 or end < start:
+            return 0
+
+        try:
+            scenarios_data = _json.loads(json_text[start : end + 1])
+        except (_json.JSONDecodeError, ValueError):
+            return 0
+
+        if not isinstance(scenarios_data, list):
+            return 0
+
+        added = 0
+        for item in scenarios_data:
+            if not isinstance(item, dict):
+                continue
+            name = (item.get("name") or "").strip()
+            if not name:
+                continue
+            description = (item.get("description") or "").strip()
+            scenario_id = (item.get("id") or "").strip()
+
+            existing = next(
+                (s for s in ctx.domain_knowledge.business_scenarios if s.name == name),
+                None,
+            )
+            if existing:
+                # Supplement an empty description, but do not overwrite
+                if description and not existing.description:
+                    existing.description = description
+            else:
+                # Resolve any id collision before inserting
+                def _next_id() -> str:
+                    return f"S{len(ctx.domain_knowledge.business_scenarios) + 1:03d}"
+
+                if scenario_id and any(
+                    s.id == scenario_id
+                    for s in ctx.domain_knowledge.business_scenarios
+                ):
+                    scenario_id = _next_id()
+                auto_id = scenario_id if scenario_id else _next_id()
+                ctx.domain_knowledge.business_scenarios.append(
+                    BusinessScenario(id=auto_id, name=name, description=description)
+                )
+                added += 1
+
+        return added
+
     def _extract_requirement_changes(self, text: str, ctx: AgentContext) -> None:
         for raw in _extract_raw_tags(text, "requirement_change"):
             elem = _safe_parse_xml(raw)
