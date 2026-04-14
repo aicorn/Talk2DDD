@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio as _asyncio
 import logging
-import types as _types
 from datetime import datetime, timezone
 from typing import Annotated
 
@@ -78,7 +77,7 @@ def _friendly_ai_error(exc: Exception) -> str:
 
 async def _ensure_conversation(
     session_id: str,
-    user: User,
+    user_id: _uuid.UUID,
     project_id: str | None,
     db: AsyncSession,
 ) -> None:
@@ -106,7 +105,7 @@ async def _ensure_conversation(
                 pass
         convo = Conversation(
             id=conv_uuid,
-            user_id=user.id,
+            user_id=user_id,
             project_id=project_uuid,
             title="AI Agent 对话",
             status="active",
@@ -129,7 +128,7 @@ async def agent_chat(
 ) -> AgentChatResponse:
     """Process a user message through the AI Agent and return a structured response."""
     await _ensure_conversation(
-        request.session_id, current_user, request.project_id, db
+        request.session_id, current_user.id, request.project_id, db
     )
 
     try:
@@ -241,10 +240,8 @@ async def _run_chat_task(
     try:
         async with AsyncSessionLocal() as db:
             try:
-                # _ensure_conversation uses only user.id, so a namespace proxy is safe.
-                user_proxy = _types.SimpleNamespace(id=user_id)
                 await _ensure_conversation(
-                    request.session_id, user_proxy, request.project_id, db
+                    request.session_id, user_id, request.project_id, db
                 )
                 result = await _agent_core.chat(
                     session_id=request.session_id,
@@ -292,7 +289,7 @@ async def agent_chat_async(
     """
     # Ensure the conversation row exists and is committed before the background
     # task starts its own session, so it can see the row.
-    await _ensure_conversation(request.session_id, current_user, request.project_id, db)
+    await _ensure_conversation(request.session_id, current_user.id, request.project_id, db)
     await db.commit()
 
     task_store = get_task_store()
@@ -357,7 +354,7 @@ async def switch_phase(
     ``"next"`` (advance) or ``"back"`` (retreat).  Returns HTTP 400 when the
     session is already at the first or last phase.
     """
-    await _ensure_conversation(request.session_id, current_user, None, db)
+    await _ensure_conversation(request.session_id, current_user.id, None, db)
 
     try:
         result = await _agent_core.switch_phase(

@@ -140,11 +140,17 @@ async function fetchWithTimeout(
  *
  * The first poll fires immediately so that fast responses (e.g. in tests or
  * when the backend is already done) are returned without any delay.
+ * An optional `signal` (AbortSignal) stops polling early when the caller is
+ * torn down (e.g. component unmount).
  */
-async function pollTaskResult(taskId: string): Promise<AgentChatResponse> {
+async function pollTaskResult(taskId: string, signal?: AbortSignal): Promise<AgentChatResponse> {
   const deadline = Date.now() + MAX_POLLING_MS
 
   while (Date.now() < deadline) {
+    if (signal?.aborted) {
+      throw new DOMException('Polling cancelled', 'AbortError')
+    }
+
     const res = await fetchWithTimeout(
       `${API_URL}/api/v1/agent/tasks/${taskId}`,
       { headers: getAuthHeaders() },
@@ -309,6 +315,16 @@ export default function ChatPage() {
   const fetchTimeoutMs = useRef<number>(FETCH_TIMEOUT_BASE_MS)
   // True when the most recent failure was a timeout; drives the doubling logic.
   const lastErrorWasTimeout = useRef<boolean>(false)
+  // AbortController for the active polling loop; cancelled on component unmount.
+  const pollingControllerRef = useRef<AbortController | null>(null)
+
+  // Cancel any in-flight polling loop when the component is torn down so we
+  // don't attempt state updates on an unmounted component.
+  useEffect(() => {
+    return () => {
+      pollingControllerRef.current?.abort()
+    }
+  }, [])
 
   // Auth guard: redirect to /login when no token is present
   useEffect(() => {
@@ -420,7 +436,11 @@ export default function ChatPage() {
       const startData: { task_id: string; status: string } = await startRes.json()
 
       // Step 2: poll until the task completes (or times out / fails).
-      const data: AgentChatResponse = await pollTaskResult(startData.task_id)
+      // Create a controller so the loop can be cancelled on component unmount.
+      const controller = new AbortController()
+      pollingControllerRef.current = controller
+      const data: AgentChatResponse = await pollTaskResult(startData.task_id, controller.signal)
+      pollingControllerRef.current = null
 
       setMessages([...next, { role: 'assistant', content: data.reply }])
       setPhase(data.phase)
@@ -443,6 +463,10 @@ export default function ChatPage() {
         setShowPhaseDoc(true)
       }
     } catch (err: unknown) {
+      // Silently ignore AbortError — it means the component was unmounted while
+      // polling was in progress; any state updates would be no-ops.
+      if (err instanceof DOMException && err.name === 'AbortError') return
+
       const isTimeout =
         err instanceof DOMException && err.name === 'TimeoutError'
       const msg = isTimeout
