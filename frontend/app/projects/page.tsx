@@ -134,8 +134,9 @@ export default function ProjectsPage() {
       )
       if (!res.ok) return
       const data = await res.json()
+      if (!data.content) return
       const filename = `${DOC_TYPE_LABELS[docType] ?? docType}_v${versionNumber}.md`
-      const blob = new Blob([data.content ?? ''], { type: 'text/markdown;charset=utf-8' })
+      const blob = new Blob([data.content], { type: 'text/markdown;charset=utf-8' })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
@@ -143,7 +144,8 @@ export default function ProjectsPage() {
       document.body.appendChild(a)
       a.click()
       document.body.removeChild(a)
-      URL.revokeObjectURL(url)
+      // Defer revocation so the browser can complete the download
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
     } catch {
       // ignore
     }
