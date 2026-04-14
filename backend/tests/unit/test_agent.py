@@ -341,6 +341,92 @@ class TestKnowledgeExtractor:
         added = extractor.merge_scenarios_from_json(json_text, ctx)
         assert added == 0
 
+    # ------------------------------------------------------------------
+    # merge_concepts_from_json tests
+    # ------------------------------------------------------------------
+
+    def test_merge_concepts_from_json_adds_new_concepts(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        json_text = '[{"name": "订单", "type": "ENTITY", "description": "用户购买请求", "confidence": 0.9}]'
+        added = extractor.merge_concepts_from_json(json_text, ctx)
+        assert added == 1
+        assert len(ctx.domain_knowledge.domain_concepts) == 1
+        c = ctx.domain_knowledge.domain_concepts[0]
+        assert c.name == "订单"
+        assert c.concept_type == ConceptType.ENTITY
+        assert c.confidence == 0.9
+
+    def test_merge_concepts_from_json_no_duplicate_by_name(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        ctx.domain_knowledge.domain_concepts.append(
+            DomainConcept(name="订单", concept_type=ConceptType.ENTITY, description="已有描述", confidence=0.8)
+        )
+        json_text = '[{"name": "订单", "type": "ENTITY", "description": "另一描述", "confidence": 0.95}]'
+        added = extractor.merge_concepts_from_json(json_text, ctx)
+        assert added == 0
+        # confidence should be bumped to the higher value
+        assert ctx.domain_knowledge.domain_concepts[0].confidence == 0.95
+        # existing description should not be overwritten
+        assert ctx.domain_knowledge.domain_concepts[0].description == "已有描述"
+
+    def test_merge_concepts_from_json_supplements_empty_description(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        ctx.domain_knowledge.domain_concepts.append(
+            DomainConcept(name="用户", concept_type=ConceptType.ENTITY, description="", confidence=0.7)
+        )
+        json_text = '[{"name": "用户", "type": "ENTITY", "description": "系统使用者", "confidence": 0.8}]'
+        extractor.merge_concepts_from_json(json_text, ctx)
+        assert ctx.domain_knowledge.domain_concepts[0].description == "系统使用者"
+
+    def test_merge_concepts_from_json_handles_empty_array(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        added = extractor.merge_concepts_from_json("[]", ctx)
+        assert added == 0
+        assert len(ctx.domain_knowledge.domain_concepts) == 0
+
+    def test_merge_concepts_from_json_handles_invalid_json(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        added = extractor.merge_concepts_from_json("not valid json", ctx)
+        assert added == 0
+
+    def test_merge_concepts_from_json_extracts_from_surrounding_text(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        json_text = (
+            '以下是提取结果：\n'
+            '[{"name": "商品", "type": "ENTITY", "description": "可购买的物品", "confidence": 0.85}]\n'
+            '完成。'
+        )
+        added = extractor.merge_concepts_from_json(json_text, ctx)
+        assert added == 1
+        assert ctx.domain_knowledge.domain_concepts[0].name == "商品"
+
+    def test_merge_concepts_from_json_skips_items_without_name(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        json_text = '[{"type": "ENTITY", "description": "没有名称"}]'
+        added = extractor.merge_concepts_from_json(json_text, ctx)
+        assert added == 0
+
+    def test_merge_concepts_from_json_defaults_unknown_type_to_entity(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        json_text = '[{"name": "未知类型概念", "type": "UNKNOWN", "description": "描述", "confidence": 0.7}]'
+        extractor.merge_concepts_from_json(json_text, ctx)
+        assert ctx.domain_knowledge.domain_concepts[0].concept_type == ConceptType.ENTITY
+
+    def test_merge_concepts_from_json_handles_missing_confidence(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        json_text = '[{"name": "支付", "type": "EVENT", "description": "支付事件"}]'
+        extractor.merge_concepts_from_json(json_text, ctx)
+        assert ctx.domain_knowledge.domain_concepts[0].confidence == 0.8
+
 
 # ---------------------------------------------------------------------------
 # PromptBuilder tests
@@ -438,6 +524,70 @@ class TestPromptBuilder:
             ai_reply="好的，报表功能是一个场景。",
         )
         assert "JSON" in prompt
+
+    def test_build_initial_domain_concept_extraction_prompt_returns_empty_when_no_scenarios(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        prompt = builder.build_initial_domain_concept_extraction_prompt(ctx)
+        assert prompt == ""
+
+    def test_build_initial_domain_concept_extraction_prompt_includes_scenarios(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        ctx.domain_knowledge.business_scenarios.append(
+            BusinessScenario(id="S001", name="用户注册", description="用户创建账号")
+        )
+        prompt = builder.build_initial_domain_concept_extraction_prompt(ctx)
+        assert "用户注册" in prompt
+        assert "JSON" in prompt
+
+    def test_build_initial_domain_concept_extraction_prompt_excludes_deprecated(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        ctx.domain_knowledge.business_scenarios.append(
+            BusinessScenario(id="S001", name="弃用场景", description="已弃用", status=ScenarioStatus.DEPRECATED)
+        )
+        prompt = builder.build_initial_domain_concept_extraction_prompt(ctx)
+        assert prompt == ""
+
+    def test_build_domain_concept_reconcile_prompt_returns_string(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        prompt = builder.build_domain_concept_reconcile_prompt(
+            ctx,
+            user_message="订单是核心概念",
+            ai_reply="是的，订单是一个实体。",
+        )
+        assert isinstance(prompt, str)
+        assert "JSON" in prompt
+
+    def test_build_domain_concept_reconcile_prompt_includes_existing_concepts(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        ctx.domain_knowledge.domain_concepts.append(
+            DomainConcept(name="订单", concept_type=ConceptType.ENTITY, description="购买请求")
+        )
+        prompt = builder.build_domain_concept_reconcile_prompt(
+            ctx,
+            user_message="还有用户概念",
+            ai_reply="用户是系统的使用者。",
+        )
+        assert "订单" in prompt
+
+    def test_phase_switch_trigger_domain_explore_uses_special_instruction(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        ctx.current_phase = Phase.DOMAIN_EXPLORE
+        prompt = builder.build(ctx, phase_switch_trigger=True)
+        assert "领域探索开场" in prompt
+
+    def test_phase_switch_trigger_other_phase_uses_generic_instruction(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        ctx.current_phase = Phase.REQUIREMENT
+        prompt = builder.build(ctx, phase_switch_trigger=True)
+        assert "领域探索开场" not in prompt
+        assert "阶段切换模式" in prompt
 
 
 # ---------------------------------------------------------------------------

@@ -179,6 +179,71 @@ class KnowledgeExtractor:
                 ClarificationQuestion(id=auto_id, question=question)
             )
 
+    def merge_concepts_from_json(self, json_text: str, ctx: AgentContext) -> int:
+        """Parse a JSON array of domain concepts and merge them into *ctx* in-place.
+
+        This method is called after the dedicated concept-extraction AI call in
+        Phase 3 (both on initial entry and after each conversation turn) to
+        reconcile any concepts that were discussed but not captured via
+        ``<concept>`` XML tags.
+
+        Returns the number of new concepts added to the context.
+        """
+        import json as _json
+
+        start = json_text.find("[")
+        end = json_text.rfind("]")
+        if start == -1 or end == -1 or end < start:
+            return 0
+
+        try:
+            concepts_data = _json.loads(json_text[start : end + 1])
+        except (_json.JSONDecodeError, ValueError):
+            return 0
+
+        if not isinstance(concepts_data, list):
+            return 0
+
+        added = 0
+        for item in concepts_data:
+            if not isinstance(item, dict):
+                continue
+            name = (item.get("name") or "").strip()
+            if not name:
+                continue
+            type_str = (item.get("type") or "ENTITY").upper()
+            description = (item.get("description") or "").strip()
+            confidence_raw = item.get("confidence")
+            try:
+                confidence = float(confidence_raw) if confidence_raw is not None else 0.8
+            except (ValueError, TypeError):
+                confidence = 0.8
+            try:
+                concept_type = ConceptType(type_str)
+            except ValueError:
+                concept_type = ConceptType.ENTITY
+
+            existing = next(
+                (c for c in ctx.domain_knowledge.domain_concepts if c.name == name),
+                None,
+            )
+            if existing:
+                existing.confidence = max(existing.confidence, confidence)
+                if description and not existing.description:
+                    existing.description = description
+            else:
+                ctx.domain_knowledge.domain_concepts.append(
+                    DomainConcept(
+                        name=name,
+                        concept_type=concept_type,
+                        description=description,
+                        confidence=confidence,
+                    )
+                )
+                added += 1
+
+        return added
+
     def merge_scenarios_from_json(self, json_text: str, ctx: AgentContext) -> int:
         """Parse a JSON array of scenarios and merge them into *ctx* in-place.
 

@@ -168,6 +168,17 @@ class AgentCore:
                 provider=provider,
             )
 
+        # 5c. In the DOMAIN_EXPLORE phase, run a dedicated concept-extraction pass to
+        #     ensure all domain concepts discussed in the conversation are captured in
+        #     the context even when the conversational AI omitted <concept> tags.
+        if ctx.current_phase == Phase.DOMAIN_EXPLORE:
+            await self._reconcile_domain_concepts(
+                ctx=ctx,
+                user_message=message,
+                ai_reply=ai_reply,
+                provider=provider,
+            )
+
         # 6. Increment turn counter
         ctx.turn_count += 1
 
@@ -260,10 +271,25 @@ class AgentCore:
 
         # 5. Retrieve immediate message history (Layer 1) and call AI
         history = await self._memory_manager.get_messages_for_ai(ctx, db)
-        trigger_msg = _PHASE_SWITCH_TRIGGERS.get(
-            ctx.current_phase,
-            f"[系统] 用户切换到阶段 {ctx.current_phase.value}。",
-        )
+
+        # For DOMAIN_EXPLORE: extract initial domain concepts from Phase 2 scenarios,
+        # then embed the rendered initial document in the trigger message so the AI
+        # can present it to the user and invite feedback.
+        if ctx.current_phase == Phase.DOMAIN_EXPLORE:
+            await self._generate_initial_domain_concepts(ctx, provider=provider)
+            initial_doc = self._doc_renderer.render(ctx)
+            trigger_msg = (
+                "[系统] 用户手动进入「领域探索」阶段（P3）。\n"
+                "系统已根据上一阶段收集的业务场景，自动提炼了初版「领域概念词汇表」，内容如下：\n\n"
+                f"{initial_doc}\n\n"
+                "请向用户展示这份初版领域概念词汇表，说明这是根据业务场景自动生成的初版，"
+                "邀请用户提出修改意见，并引导进入下一个领域探索问题。"
+            )
+        else:
+            trigger_msg = _PHASE_SWITCH_TRIGGERS.get(
+                ctx.current_phase,
+                f"[系统] 用户切换到阶段 {ctx.current_phase.value}。",
+            )
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(history)
         messages.append({"role": "user", "content": trigger_msg})
@@ -350,6 +376,74 @@ class AgentCore:
         except Exception:
             _logging.getLogger(__name__).debug(
                 "Scenario reconciliation failed for session %s (non-fatal)",
+                ctx.session_id,
+                exc_info=True,
+            )
+
+    async def _generate_initial_domain_concepts(
+        self,
+        ctx: AgentContext,
+        provider: Optional[str] = None,
+    ) -> None:
+        """Extract initial domain concepts from Phase 2 business scenarios.
+
+        This is called once when the session enters DOMAIN_EXPLORE so that the
+        opening phase document already contains a seed set of concepts derived
+        from all collected business scenarios.  The result is merged into
+        ``ctx.domain_knowledge.domain_concepts``.
+
+        This call is non-fatal: any exception is silently logged and the phase
+        switch continues uninterrupted (the document will simply be empty).
+        """
+        import logging as _logging
+
+        try:
+            extraction_prompt = (
+                self._prompt_builder.build_initial_domain_concept_extraction_prompt(ctx)
+            )
+            if not extraction_prompt:
+                return
+            messages = [{"role": "user", "content": extraction_prompt}]
+            json_reply = await chat_completion(messages=messages, provider=provider)
+            self._knowledge_extractor.merge_concepts_from_json(json_reply, ctx)
+        except Exception:
+            _logging.getLogger(__name__).debug(
+                "Initial domain concept extraction failed for session %s (non-fatal)",
+                ctx.session_id,
+                exc_info=True,
+            )
+
+    async def _reconcile_domain_concepts(
+        self,
+        ctx: AgentContext,
+        user_message: str,
+        ai_reply: str,
+        provider: Optional[str] = None,
+    ) -> None:
+        """Run a dedicated extractor AI call to reconcile domain concepts.
+
+        This is the "Extractor Role" in the dual-role pattern for Phase 3.
+        After the main conversational AI response has been processed, a second
+        lightweight AI call is made whose only job is to identify ALL domain
+        concepts mentioned in the current exchange and return them as JSON.
+        The result is merged into ``ctx.domain_knowledge.domain_concepts``
+        so the phase document is always in sync with what was discussed.
+
+        This call is non-fatal: any exception is silently logged and the
+        regular flow continues uninterrupted.
+        """
+        import logging as _logging
+
+        try:
+            reconcile_prompt = self._prompt_builder.build_domain_concept_reconcile_prompt(
+                ctx, user_message, ai_reply
+            )
+            messages = [{"role": "user", "content": reconcile_prompt}]
+            json_reply = await chat_completion(messages=messages, provider=provider)
+            self._knowledge_extractor.merge_concepts_from_json(json_reply, ctx)
+        except Exception:
+            _logging.getLogger(__name__).debug(
+                "Domain concept reconciliation failed for session %s (non-fatal)",
                 ctx.session_id,
                 exc_info=True,
             )

@@ -154,6 +154,17 @@ _PHASE_SWITCH_INSTRUCTION = """【阶段切换模式】
 4. 提出 1~2 个本阶段的首要行动项或引导问题
 语气积极、简洁，避免重复已知信息，不要在回复中输出任何 XML 标记。"""
 
+# Phase-specific override for DOMAIN_EXPLORE entry
+_PHASE_SWITCH_INSTRUCTION_DOMAIN_EXPLORE = """【阶段切换模式 - 领域探索开场】
+本轮对话由用户手动切换到「领域探索」阶段触发。系统已根据上一阶段的业务场景自动提炼了初版领域概念词汇表，并作为参考内容附在用户消息中。
+请生成一段结构化的「领域探索开场消息」，内容包括：
+1. 一句话欢迎进入第 3 阶段「领域探索」，说明本阶段目标（从业务场景中提炼领域术语，建立通用语言）
+2. 告知用户：已根据已收集的业务场景自动提炼了初版领域概念词汇表
+3. 完整展示用户消息中提供的初版领域概念词汇表（保持 Markdown 表格格式，如表格为空则说明尚未识别到概念）
+4. 邀请用户提出修改意见：哪些概念需要调整？是否有遗漏的业务对象或业务规则？
+5. 提出 1 个具体的引导问题，帮助用户进一步确认或补充领域概念
+不要在回复中输出任何 XML 标记。"""
+
 
 class PromptBuilder:
     """Assembles the layered system prompt for the current phase and context."""
@@ -179,7 +190,12 @@ class PromptBuilder:
             _XML_EXTRACTION_FORMAT,         # Layers 5+6
         ]
         if phase_switch_trigger:
-            layers.append(_PHASE_SWITCH_INSTRUCTION)
+            switch_instruction = (
+                _PHASE_SWITCH_INSTRUCTION_DOMAIN_EXPLORE
+                if ctx.current_phase == Phase.DOMAIN_EXPLORE
+                else _PHASE_SWITCH_INSTRUCTION
+            )
+            layers.append(switch_instruction)
         return "\n\n---\n\n".join(layer.strip() for layer in layers if layer.strip())
 
     # ------------------------------------------------------------------
@@ -258,6 +274,82 @@ class PromptBuilder:
         lines.append("[/CONTEXT_BLOCK]")
 
         return "\n".join(lines)
+
+    def build_initial_domain_concept_extraction_prompt(self, ctx: AgentContext) -> str:
+        """Build a prompt for extracting initial domain concepts from business scenarios.
+
+        Called once when the session first enters DOMAIN_EXPLORE so that a
+        seed set of concepts is available for the opening phase document.
+        Returns an empty string when there are no active scenarios to work from.
+        """
+        active = [
+            s for s in ctx.domain_knowledge.business_scenarios
+            if s.status.value != "DEPRECATED"
+        ]
+        if not active:
+            return ""
+
+        scenarios_text = "\n".join(
+            f"- {s.id}: {s.name}：{s.description}" for s in active
+        )
+        return (
+            "你是领域概念提取助手，负责从业务场景中识别并结构化领域概念。\n\n"
+            "请从以下业务场景中提取所有核心领域概念（实体、值对象、领域事件、聚合等），"
+            "以 JSON 数组格式返回。每个元素包含：\n"
+            '  - "name"：概念名称（简洁名词或名词短语）\n'
+            '  - "type"：ENTITY/VALUE_OBJECT/SERVICE/EVENT/AGGREGATE/REPOSITORY/DOMAIN_SERVICE 之一\n'
+            '  - "description"：1~2 句描述\n'
+            '  - "confidence"：置信度 0.0~1.0\n\n'
+            "重点：核心业务对象（名词）为 ENTITY；描述不变属性的概念为 VALUE_OBJECT；"
+            "表示已发生事情的动词短语（如『下单』→ OrderPlaced）为 EVENT；多个对象的一致性边界为 AGGREGATE。\n"
+            "只返回 JSON 数组，不要任何其他文字或 Markdown 标记。\n\n"
+            "---\n"
+            f"业务场景列表：\n{scenarios_text}"
+        )
+
+    def build_domain_concept_reconcile_prompt(
+        self,
+        ctx: AgentContext,
+        user_message: str,
+        ai_reply: str,
+    ) -> str:
+        """Build a focused extraction prompt for the dedicated concept reconciler.
+
+        Sent as a second lightweight AI call after each Phase 3 turn whose sole
+        job is to identify ALL domain concepts mentioned in the exchange and
+        return them as JSON.  The result is merged into
+        ``ctx.domain_knowledge.domain_concepts``.
+
+        Returns a single user-role message string.
+        """
+        existing = ctx.domain_knowledge.domain_concepts
+        if existing:
+            existing_lines = "\n".join(
+                f'  {{"name": "{c.name}", "type": "{c.concept_type.value}", '
+                f'"description": "{c.description}"}}'
+                for c in existing
+            )
+            existing_block = (
+                f"已有领域概念（请勿重复，但可补充描述）：\n[\n{existing_lines}\n]"
+            )
+        else:
+            existing_block = "已有领域概念：[]（尚无）"
+
+        return (
+            "你是领域概念提取助手，负责从对话片段中识别并结构化领域概念。\n\n"
+            f"{existing_block}\n\n"
+            "请从下面这轮对话中提取**所有**提到或讨论过的领域概念（包括已有概念的补充信息），"
+            "以 JSON 数组格式返回。每个元素包含：\n"
+            '  - "name"：概念名称\n'
+            '  - "type"：ENTITY/VALUE_OBJECT/SERVICE/EVENT/AGGREGATE/REPOSITORY/DOMAIN_SERVICE\n'
+            '  - "description"：1~2 句描述\n'
+            '  - "confidence"：置信度 0.0~1.0\n\n'
+            "如果本轮对话未涉及任何领域概念，返回空数组 []。\n"
+            "只返回 JSON 数组，不要任何其他文字或 Markdown 标记。\n\n"
+            "---\n"
+            f"用户说：\n{user_message}\n\n"
+            f"AI 回复：\n{ai_reply}"
+        )
 
     def build_scenario_extraction_prompt(
         self,
