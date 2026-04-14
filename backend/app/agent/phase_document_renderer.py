@@ -54,6 +54,7 @@ class PhaseDocumentRenderer:
         lines.append(
             f"**领域背景：** {dk.domain_description or '（待收集）'}\n"
         )
+        lines.extend(self._render_clarification_section(ctx))
         return "\n".join(lines)
 
     def _render_clarification_section(self, ctx: AgentContext) -> list:
