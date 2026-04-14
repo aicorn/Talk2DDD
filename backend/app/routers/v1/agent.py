@@ -27,8 +27,6 @@ from app.schemas.agent import (
     ConversationListResponse,
     ConversationSummary,
     ExtractedConcept,
-    GenerateDocumentRequest,
-    GenerateDocumentResponse,
     PhaseDocumentResponse,
     PhaseDocumentSchema,
     RequirementChangeSummary,
@@ -176,59 +174,8 @@ async def agent_chat(
         requirement_changes=[
             RequirementChangeSummary(**c) for c in result.requirement_changes
         ],
-        stale_documents=result.stale_documents,
-        pending_documents=result.pending_documents,
         phase_document=phase_doc,
         tech_stack_preferences=result.tech_stack_preferences,
-    )
-
-
-# ---------------------------------------------------------------------------
-# POST /generate-document
-# ---------------------------------------------------------------------------
-
-
-@router.post(
-    "/generate-document",
-    response_model=GenerateDocumentResponse,
-    status_code=200,
-)
-async def generate_document(
-    request: GenerateDocumentRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-) -> GenerateDocumentResponse:
-    """Generate a DDD document based on the current agent context."""
-    await _ensure_conversation(
-        request.session_id, current_user, request.project_id, db
-    )
-
-    try:
-        content, version_id, project_id = await _agent_core.generate_document(
-            session_id=request.session_id,
-            document_type=request.document_type,
-            db=db,
-            project_id=request.project_id,
-            provider=request.provider,
-        )
-    except (openai.OpenAIError, ValueError, RuntimeError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=_friendly_ai_error(exc),
-        ) from exc
-    except Exception as exc:
-        logger.exception("Unhandled error in generate_document: %s", exc)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"服务器内部错误：{type(exc).__name__}: {exc}",
-        ) from exc
-
-    return GenerateDocumentResponse(
-        document_type=request.document_type,
-        content=content,
-        version_id=version_id,
-        project_id=project_id,
-        generated_at=datetime.now(timezone.utc),
     )
 
 
@@ -300,8 +247,6 @@ async def switch_phase(
         requirement_changes=[
             RequirementChangeSummary(**c) for c in result.requirement_changes
         ],
-        stale_documents=result.stale_documents,
-        pending_documents=result.pending_documents,
         phase_document=phase_doc,
         tech_stack_preferences=result.tech_stack_preferences,
         phase_changed=result.phase_changed,
@@ -354,7 +299,6 @@ async def get_context(
         generated_documents=[
             d.model_dump(mode="json") for d in ctx.generated_documents
         ],
-        stale_documents=ctx.get_stale_documents(),
         tech_stack_preferences=tech_stack_data,
     )
 
@@ -379,7 +323,6 @@ async def get_requirement_changes(
     return RequirementChangesResponse(
         session_id=session_id,
         changes=[c.model_dump(mode="json") for c in ctx.requirement_changes],
-        stale_documents=ctx.get_stale_documents(),
     )
 
 
@@ -402,7 +345,7 @@ async def get_phase_document(
     """Return the latest phase document for a session and phase.
 
     *phase* must be one of: ICEBREAK, REQUIREMENT, DOMAIN_EXPLORE,
-    MODEL_DESIGN, DOC_GENERATE, REVIEW_REFINE.
+    MODEL_DESIGN, REVIEW_REFINE.
     """
     try:
         phase_enum = Phase(phase.upper())

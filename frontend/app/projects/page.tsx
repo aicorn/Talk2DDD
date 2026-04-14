@@ -12,6 +12,11 @@ const DOC_TYPE_LABELS: Record<string, string> = {
   UBIQUITOUS_LANGUAGE: '通用语言术语表',
   USE_CASES: '用例说明文档',
   TECH_ARCHITECTURE: '技术架构文档',
+  PHASE_ICEBREAK: '项目简介',
+  PHASE_REQUIREMENT: '业务需求草稿',
+  PHASE_DOMAIN_EXPLORE: '领域概念词汇表',
+  PHASE_MODEL_DESIGN: '领域模型草稿',
+  PHASE_REVIEW_REFINE: '审阅完善记录',
 }
 
 interface UserInfo {
@@ -116,6 +121,31 @@ export default function ProjectsPage() {
         const data = await res.json()
         setViewingDoc({ content: data.content, title: DOC_TYPE_LABELS[docType] ?? docType })
       }
+    } catch {
+      // ignore
+    }
+  }
+
+  async function downloadDocument(projectId: string, docId: string, docType: string, versionNumber: number) {
+    try {
+      const res = await fetch(
+        `${API_URL}/api/v1/projects/${projectId}/documents/${docId}/content`,
+        { headers: getAuthHeaders() }
+      )
+      if (!res.ok) return
+      const data = await res.json()
+      if (!data.content) return
+      const filename = `${DOC_TYPE_LABELS[docType] ?? docType}_v${versionNumber}.md`
+      const blob = new Blob([data.content], { type: 'text/markdown;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      // Defer revocation so the browser can complete the download
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
     } catch {
       // ignore
     }
@@ -292,12 +322,21 @@ export default function ProjectsPage() {
                                   {new Date(doc.created_at).toLocaleString('zh-CN')}
                                 </span>
                               </div>
-                              <button
-                                onClick={() => viewDocument(proj.id, doc.id, doc.document_type)}
-                                className="ml-4 px-3 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors shrink-0"
-                              >
-                                查看
-                              </button>
+                              <div className="flex items-center gap-2 ml-4 shrink-0">
+                                <button
+                                  onClick={() => viewDocument(proj.id, doc.id, doc.document_type)}
+                                  className="px-3 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
+                                >
+                                  查看
+                                </button>
+                                <button
+                                  onClick={() => downloadDocument(proj.id, doc.id, doc.document_type, doc.version_number)}
+                                  className="px-3 py-1 text-xs bg-gray-100 text-gray-700 border border-gray-300 rounded hover:bg-gray-200 transition-colors"
+                                  aria-label="下载 Markdown 文件"
+                                >
+                                  ⬇ 下载 .md
+                                </button>
+                              </div>
                             </div>
                           ))}
                       </div>

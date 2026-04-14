@@ -38,7 +38,7 @@ _XML_EXTRACTION_FORMAT = """【结构化提取规则】
 识别到项目基本信息时：
 <project_info name="项目名称" domain="领域背景描述"/>
 
-识别到需求变更时（P3~P6 阶段）：
+识别到需求变更时（P3~P5 阶段）：
 <requirement_change type="ADD|MODIFY|DEPRECATE" target_id="如有则填场景ID" trigger_rollback="true|false">
   <description>变更描述</description>
   <affected_documents>受影响文档类型（逗号分隔，如 BUSINESS_REQUIREMENT,USE_CASES）</affected_documents>
@@ -54,7 +54,7 @@ _XML_EXTRACTION_FORMAT = """【结构化提取规则】
 # Layer 2 – Phase-specific instructions
 # ---------------------------------------------------------------------------
 _PHASE_INSTRUCTIONS: dict[Phase, str] = {
-    Phase.ICEBREAK: """【当前阶段：破冰引入 P1/6】
+    Phase.ICEBREAK: """【当前阶段：破冰引入 P1/5】
 目标：了解用户角色和项目背景，放松引导
 
 任务：
@@ -65,7 +65,7 @@ _PHASE_INSTRUCTIONS: dict[Phase, str] = {
 
 当识别到项目名称和领域背景时，嵌入 <project_info> 标记。""",
 
-    Phase.REQUIREMENT: """【当前阶段：需求收集 P2/6】
+    Phase.REQUIREMENT: """【当前阶段：需求收集 P2/5】
 目标：逐一梳理主要业务流程，挖掘边界场景
 
 任务：
@@ -76,7 +76,7 @@ _PHASE_INSTRUCTIONS: dict[Phase, str] = {
 
 当识别到业务场景时，嵌入 <scenario> 标记。""",
 
-    Phase.DOMAIN_EXPLORE: """【当前阶段：领域探索 P3/6】
+    Phase.DOMAIN_EXPLORE: """【当前阶段：领域探索 P3/5】
 目标：从需求中提炼领域术语，建立通用语言
 
 任务：
@@ -94,7 +94,7 @@ _PHASE_INSTRUCTIONS: dict[Phase, str] = {
   • "之前说的…其实"、"改一下"、"调整一下"、"变成了" → type="MODIFY"
   • "取消"、"砍掉"、"不需要了"、"去掉" → type="DEPRECATE\"""",
 
-    Phase.MODEL_DESIGN: """【当前阶段：模型设计 P4/6】
+    Phase.MODEL_DESIGN: """【当前阶段：模型设计 P4/5】
 目标：引导用户确定聚合边界和限界上下文划分，并在模型确认后询问技术栈偏好
 
 任务：
@@ -104,10 +104,10 @@ _PHASE_INSTRUCTIONS: dict[Phase, str] = {
 4. 划分限界上下文：不同团队负责哪些业务？
 5. 引导用户确认领域模型草稿
 6. **模型确认后**，自然过渡询问技术栈偏好：
-   - "模型已经很清晰了！在生成技术架构文档前，想了解一下你们团队的技术偏好，这样推荐的方案会更贴合实际情况。前端框架有偏好吗？"
+   - "模型已经很清晰了！在进入审阅阶段前，想了解一下你们团队的技术偏好，这样模型草稿中的技术架构建议会更贴合实际情况。前端框架有偏好吗？"
    - 逐步询问：前端 → 后端 → 数据库 → 基础设施（可选）→ 消息队列（可选）
    - 如果用户说"不懂"、"你帮我选"或"跳过"，使用 <tech_stack skipped="true"/> 标记并告知 AI 将自动推荐
-   - 确认完成后，告知用户条件已满足，提示点击「下一阶段 →」按钮进入文档生成阶段（不要自动切换阶段）
+   - 确认完成后，告知用户可以点击「下一阶段 →」按钮进入审阅完善阶段（不要自动切换阶段）
 7. 用户也可以随时输入 /techstack 重新发起技术栈确认
 
 输出领域模型草稿（文字描述 + 树形或列表结构）。
@@ -115,42 +115,26 @@ _PHASE_INSTRUCTIONS: dict[Phase, str] = {
 
 【需求变更检测】（同 P3 阶段规则）""",
 
-    Phase.DOC_GENERATE: """【当前阶段：文档生成 P5/6】
-目标：引导用户选择要生成的 DDD 文档类型，并通过点击页面按钮触发生成
+    Phase.REVIEW_REFINE: """【当前阶段：审阅完善 P5/5】
+目标：收集用户对各阶段文档的反馈，定向修订
 
 任务：
-1. 告知用户当前已积累了足够的领域知识，可以生成 DDD 文档
-2. 介绍可生成的文档类型及其用途：
-   - BUSINESS_REQUIREMENT：业务需求文档
-   - DOMAIN_MODEL：领域模型文档
-   - UBIQUITOUS_LANGUAGE：通用语言术语表
-   - USE_CASES：用例说明
-   - TECH_ARCHITECTURE：技术架构建议
-3. 引导用户点击页面下方的「生成文档」按钮选择要生成的文档
-4. **请勿**在对话中直接输出文档全文，文档由系统后台生成
-5. 文档生成后，告知用户可以进行审阅，提示点击「下一阶段 →」按钮进入审阅完善阶段（不要自动切换阶段）
-
-【需求变更检测】（同 P3 阶段规则）""",
-
-    Phase.REVIEW_REFINE: """【当前阶段：审阅完善 P6/6】
-目标：收集用户对文档的反馈，定向修订
-
-任务：
-1. 引导用户审阅已生成的文档
-2. 支持局部修订（"第3节的聚合边界有误，请修改…"）
-3. 支持全量重写
+1. 引导用户在「我的项目」中审阅已自动保存的各阶段文档
+2. 支持局部修订（"领域模型草稿中的聚合边界有误，请修改…"）
+3. 支持针对某个阶段的内容进行二次润色
 4. 记录修订历史
-5. 提醒用户过期（STALE）文档需要更新
+5. 告知用户修改后相应阶段文档会自动重新保存到「我的项目」
 
 可用指令：
-  /regenerate [文档类型] — 重新生成指定文档
-  /complete — 标记项目完成""",
+  /techstack — 重新设置技术栈偏好
+  /complete — 标记项目完成
+
+【需求变更检测】（同 P3 阶段规则）""",
 }
 
 _CHANGE_DETECTION_PHASES = {
     Phase.DOMAIN_EXPLORE,
     Phase.MODEL_DESIGN,
-    Phase.DOC_GENERATE,
     Phase.REVIEW_REFINE,
 }
 

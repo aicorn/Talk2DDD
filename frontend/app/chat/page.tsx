@@ -29,8 +29,6 @@ interface AgentChatResponse {
   progress: number
   suggestions: string[]
   extracted_concepts: Array<{ name: string; type: string; confidence: number }>
-  stale_documents: string[]
-  pending_documents: string[]
   phase_document: PhaseDocument | null
   tech_stack_preferences: TechStackPreferences | null
   phase_changed?: boolean
@@ -61,7 +59,6 @@ const PHASE_KEYS = [
   'REQUIREMENT',
   'DOMAIN_EXPLORE',
   'MODEL_DESIGN',
-  'DOC_GENERATE',
   'REVIEW_REFINE',
 ] as const
 
@@ -70,16 +67,7 @@ const PHASE_LABELS: Record<string, string> = {
   REQUIREMENT: '需求收集',
   DOMAIN_EXPLORE: '领域探索',
   MODEL_DESIGN: '模型设计',
-  DOC_GENERATE: '文档生成',
   REVIEW_REFINE: '审阅完善',
-}
-
-const DOC_TYPE_LABELS: Record<string, string> = {
-  BUSINESS_REQUIREMENT: '业务需求文档',
-  DOMAIN_MODEL: '领域模型文档',
-  UBIQUITOUS_LANGUAGE: '通用语言术语表',
-  USE_CASES: '用例说明',
-  TECH_ARCHITECTURE: '技术架构建议',
 }
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? ''
@@ -250,8 +238,6 @@ export default function ChatPage() {
   const [suggestions, setSuggestions] = useState<string[]>([])
   const [phaseDocument, setPhaseDocument] = useState<PhaseDocument | null>(null)
   const [showPhaseDoc, setShowPhaseDoc] = useState(false)
-  const [pendingDocuments, setPendingDocuments] = useState<string[]>([])
-  const [generatingDoc, setGeneratingDoc] = useState<string | null>(null)
   const [techStackPreferences, setTechStackPreferences] = useState<TechStackPreferences | null>(null)
   const [showTechStackPicker, setShowTechStackPicker] = useState(false)
   const [phaseChanging, setPhaseChanging] = useState(false)
@@ -371,7 +357,6 @@ export default function ChatPage() {
       setPhase(data.phase)
       setProgress(data.progress)
       setSuggestions(data.suggestions ?? [])
-      setPendingDocuments(data.pending_documents ?? [])
       setLastFailedMessage(null)
       lastErrorWasTimeout.current = false
       fetchTimeoutMs.current = FETCH_TIMEOUT_BASE_MS
@@ -435,66 +420,6 @@ export default function ChatPage() {
     setError(null)
     setLastFailedMessage(null)
     sendMessage(msgToRetry)
-  }
-
-  /** Call /generate-document directly (bypasses chat AI to avoid ECONNRESET). */
-  async function generateDocument(documentType: string) {
-    if (generatingDoc || loading) return
-    setGeneratingDoc(documentType)
-    setError(null)
-    try {
-      const res = await fetchWithTimeout(
-        `${API_URL}/api/v1/agent/generate-document`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...getAuthHeaders(),
-          },
-          body: JSON.stringify({ session_id: sessionId, document_type: documentType, provider }),
-        },
-        fetchTimeoutMs.current,
-      )
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}))
-        throw new Error(parseApiError(res, data))
-      }
-      const data = await res.json()
-      const label = DOC_TYPE_LABELS[documentType] ?? documentType
-      const savedMsg = data.project_id
-        ? `✅ **${label}**已生成完毕，并已保存到「我的项目」！请查看右侧文档面板。`
-        : `✅ **${label}**已生成完毕！请查看右侧文档面板。`
-      // Add a system message into the chat to confirm generation
-      setMessages((prev) => [
-        ...prev,
-        { role: 'assistant', content: savedMsg },
-      ])
-      // Display the generated document in the side panel
-      setPhaseDocument({
-        phase,
-        title: label,
-        content: data.content,
-        rendered_at: data.generated_at,
-        turn_count: 0,
-      })
-      setShowPhaseDoc(true)
-      // Remove this doc type from the pending list
-      setPendingDocuments((prev) => prev.filter((t) => t !== documentType))
-    } catch (err: unknown) {
-      const isTimeout = err instanceof DOMException && err.name === 'TimeoutError'
-      const msg = isTimeout
-        ? `文档生成请求超时（等待 ${Math.round(fetchTimeoutMs.current / 1000)} 秒无响应），请重试`
-        : err instanceof Error
-          ? err.message
-          : '文档生成失败，请重试'
-      if (msg === '__AUTH_ERROR__') {
-        router.push('/login')
-        return
-      }
-      setError(msg)
-    } finally {
-      setGeneratingDoc(null)
-    }
   }
 
   async function switchPhase(direction: 'next' | 'back') {
@@ -566,7 +491,6 @@ export default function ChatPage() {
       setPhase(data.phase)
       setProgress(data.progress)
       setSuggestions(data.suggestions ?? [])
-      setPendingDocuments(data.pending_documents ?? [])
       if (data.tech_stack_preferences !== undefined) {
         setTechStackPreferences(data.tech_stack_preferences)
       }
@@ -758,23 +682,6 @@ export default function ChatPage() {
             </div>
           )}
 
-          {/* Document generation buttons — shown in DOC_GENERATE / REVIEW_REFINE phases */}
-          {pendingDocuments.length > 0 && (
-            <div className="flex flex-wrap gap-1 mb-2" aria-label="generate document buttons">
-              <span className="text-xs text-gray-500 self-center mr-1">生成文档：</span>
-              {pendingDocuments.map((docType) => (
-                <button
-                  key={docType}
-                  onClick={() => generateDocument(docType)}
-                  disabled={!!generatingDoc || loading}
-                  className="px-2 py-1 text-xs bg-green-50 text-green-700 rounded-full border border-green-200 hover:bg-green-100 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {generatingDoc === docType ? '⏳ 生成中…' : `📄 ${DOC_TYPE_LABELS[docType] ?? docType}`}
-                </button>
-              ))}
-            </div>
-          )}
-
           {error && (
             <div className="flex items-center gap-2 mb-2 flex-wrap" role="alert">
               <p className="text-red-500 text-sm">⚠️ {error}</p>
@@ -842,9 +749,18 @@ export default function ChatPage() {
               )}
             </div>
             {phaseDocument && (
-              <div className="px-4 py-2 border-t text-xs text-gray-400 shrink-0">
-                第 {phaseDocument.turn_count} 轮 ·{' '}
-                {new Date(phaseDocument.rendered_at).toLocaleTimeString()}
+              <div className="px-4 py-2 border-t text-xs text-gray-400 shrink-0 flex items-center justify-between">
+                <span>
+                  第 {phaseDocument.turn_count} 轮 ·{' '}
+                  {new Date(phaseDocument.rendered_at).toLocaleTimeString()}
+                </span>
+                <a
+                  href="/projects"
+                  className="text-blue-500 hover:text-blue-700 hover:underline"
+                  aria-label="查看我的项目"
+                >
+                  查看我的项目 →
+                </a>
               </div>
             )}
           </div>
