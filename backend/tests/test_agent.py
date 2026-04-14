@@ -79,8 +79,6 @@ async def test_agent_chat_returns_200(auth_client):
             suggestions=["请介绍项目背景"],
             extracted_concepts=[],
             requirement_changes=[],
-            stale_documents=[],
-            pending_documents=[],
             phase_document=PhaseDocumentResult(
                 phase="ICEBREAK",
                 title="项目简介",
@@ -133,8 +131,6 @@ async def test_agent_chat_response_schema(auth_client):
                 {"name": "订单", "type": "ENTITY", "confidence": 0.9}
             ],
             requirement_changes=[],
-            stale_documents=[],
-            pending_documents=[],
             phase_document=None,
         )
 
@@ -152,38 +148,6 @@ async def test_agent_chat_response_schema(auth_client):
     assert "suggestions" in data
     assert "extracted_concepts" in data
     assert "requirement_changes" in data
-    assert "stale_documents" in data
-    assert "pending_documents" in data
-
-
-@pytest.mark.asyncio
-async def test_generate_document_returns_200(auth_client):
-    client, mock_user = auth_client
-    session_id = str(uuid.uuid4())
-    version_id = str(uuid.uuid4())
-
-    with (
-        patch(
-            "app.routers.v1.agent._ensure_conversation",
-            new_callable=AsyncMock,
-        ),
-        patch(
-            "app.routers.v1.agent._agent_core.generate_document",
-            new_callable=AsyncMock,
-            return_value=("# 领域模型\n\n...", version_id, None),
-        ),
-    ):
-        response = await client.post(
-            "/api/v1/agent/generate-document",
-            json={"session_id": session_id, "document_type": "DOMAIN_MODEL"},
-        )
-
-    assert response.status_code == 200
-    data = response.json()
-    assert data["document_type"] == "DOMAIN_MODEL"
-    assert data["content"] == "# 领域模型\n\n..."
-    assert data["version_id"] == version_id
-    assert "generated_at" in data
 
 
 @pytest.mark.asyncio
@@ -233,7 +197,6 @@ async def test_get_requirement_changes_returns_200(auth_client):
     data = response.json()
     assert data["session_id"] == session_id
     assert "changes" in data
-    assert "stale_documents" in data
 
 
 @pytest.mark.asyncio
