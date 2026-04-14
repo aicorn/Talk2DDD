@@ -29,8 +29,6 @@ class PhaseEngine:
             return self._next_phase(ctx)
         if "/back" in msg_lower:
             return self._prev_phase(ctx)
-        if "/generate" in msg_lower:
-            return Phase.DOC_GENERATE
         if "/model" in msg_lower:
             return Phase.MODEL_DESIGN
         if "/techstack" in msg_lower:

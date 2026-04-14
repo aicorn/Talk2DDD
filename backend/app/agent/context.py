@@ -15,7 +15,6 @@ class Phase(str, Enum):
     REQUIREMENT = "REQUIREMENT"
     DOMAIN_EXPLORE = "DOMAIN_EXPLORE"
     MODEL_DESIGN = "MODEL_DESIGN"
-    DOC_GENERATE = "DOC_GENERATE"
     REVIEW_REFINE = "REVIEW_REFINE"
 
 
@@ -24,7 +23,6 @@ PHASE_ORDER: List[Phase] = [
     Phase.REQUIREMENT,
     Phase.DOMAIN_EXPLORE,
     Phase.MODEL_DESIGN,
-    Phase.DOC_GENERATE,
     Phase.REVIEW_REFINE,
 ]
 
@@ -33,16 +31,14 @@ PHASE_LABELS: dict[Phase, str] = {
     Phase.REQUIREMENT: "需求收集",
     Phase.DOMAIN_EXPLORE: "领域探索",
     Phase.MODEL_DESIGN: "模型设计",
-    Phase.DOC_GENERATE: "文档生成",
     Phase.REVIEW_REFINE: "审阅完善",
 }
 
 PHASE_PROGRESS: dict[Phase, float] = {
     Phase.ICEBREAK: 0.0,
-    Phase.REQUIREMENT: 0.2,
-    Phase.DOMAIN_EXPLORE: 0.4,
-    Phase.MODEL_DESIGN: 0.6,
-    Phase.DOC_GENERATE: 0.8,
+    Phase.REQUIREMENT: 0.25,
+    Phase.DOMAIN_EXPLORE: 0.5,
+    Phase.MODEL_DESIGN: 0.75,
     Phase.REVIEW_REFINE: 1.0,
 }
 

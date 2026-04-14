@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from app.agent.context import AgentContext, DocumentStatus, Phase, PHASE_LABELS
+from app.agent.context import AgentContext, Phase, PHASE_LABELS
 
 
 class PhaseDocumentRenderer:
@@ -25,8 +25,6 @@ class PhaseDocumentRenderer:
             return self._render_domain_explore(ctx)
         if phase == Phase.MODEL_DESIGN:
             return self._render_model_design(ctx)
-        if phase == Phase.DOC_GENERATE:
-            return self._render_doc_generate(ctx)
         if phase == Phase.REVIEW_REFINE:
             return self._render_review_refine(ctx)
         return f"# {PHASE_LABELS.get(phase, phase.value)}\n\n（暂无内容）"
@@ -38,7 +36,6 @@ class PhaseDocumentRenderer:
             Phase.REQUIREMENT: "业务需求草稿",
             Phase.DOMAIN_EXPLORE: "领域概念词汇表",
             Phase.MODEL_DESIGN: "领域模型草稿",
-            Phase.DOC_GENERATE: "已生成文档列表",
             Phase.REVIEW_REFINE: "修订记录",
         }
         return _TITLES.get(ctx.current_phase, PHASE_LABELS.get(ctx.current_phase, ""))
@@ -189,42 +186,6 @@ class PhaseDocumentRenderer:
                 "_尚未采集。模型确认后 AI 将引导您选择技术栈，"
                 "或输入 `/techstack` 随时触发。_\n"
             )
-
-        return "\n".join(lines)
-
-    def _render_doc_generate(self, ctx: AgentContext) -> str:
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
-        lines = [
-            f"# 已生成文档列表\n",
-            f"> 更新时间：{now}  |  对话轮次：{ctx.turn_count}\n",
-        ]
-        if ctx.generated_documents:
-            lines.append("| 文档类型 | 生成时间 | 状态 |")
-            lines.append("|----------|----------|------|")
-            for doc in ctx.generated_documents:
-                status_label = {
-                    DocumentStatus.CURRENT: "✅ 最新",
-                    DocumentStatus.STALE: "⚠️ 需更新",
-                    DocumentStatus.SUPERSEDED: "🔄 已替换",
-                }.get(doc.status, doc.status.value)
-                generated_at = (
-                    doc.generated_at.strftime("%Y-%m-%d %H:%M")
-                    if doc.generated_at
-                    else "—"
-                )
-                lines.append(
-                    f"| {doc.document_type} | {generated_at} | {status_label} |"
-                )
-            lines.append("")
-        else:
-            lines.append("_尚未生成任何文档。_\n")
-
-        stale = ctx.get_stale_documents()
-        if stale:
-            lines.append("## ⚠️ 需要更新的文档\n")
-            for doc_type in stale:
-                lines.append(f"- {doc_type}")
-            lines.append("")
 
         return "\n".join(lines)
 

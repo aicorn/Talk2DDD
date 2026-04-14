@@ -69,21 +69,24 @@ class TestPhaseEngine:
         result = engine.evaluate(ctx, "/back")
         assert result is None
 
-    def test_generate_command_jumps_to_doc_generate(self):
+    def test_generate_command_returns_none(self):
+        """The /generate command no longer triggers a phase jump."""
         engine = PhaseEngine()
         ctx = make_context()
         result = engine.evaluate(ctx, "/generate")
-        assert result == Phase.DOC_GENERATE
+        assert result is None
 
-    def test_exit_condition_icebreak_met(self):
+    def test_exit_condition_icebreak_not_auto(self):
+        """evaluate() no longer triggers auto phase transitions; returns None."""
         engine = PhaseEngine()
         ctx = make_context()
         ctx.domain_knowledge.project_name = "电商系统"
         ctx.domain_knowledge.domain_description = "B2C 电商平台"
         result = engine.evaluate(ctx, "")
-        assert result == Phase.REQUIREMENT
+        assert result is None
 
-    def test_exit_condition_requirement_met(self):
+    def test_exit_condition_requirement_not_auto(self):
+        """evaluate() no longer triggers auto phase transitions; returns None."""
         engine = PhaseEngine()
         ctx = make_context()
         ctx.current_phase = Phase.REQUIREMENT
@@ -92,9 +95,10 @@ class TestPhaseEngine:
                 BusinessScenario(name=f"场景{i}", description="描述")
             )
         result = engine.evaluate(ctx, "")
-        assert result == Phase.DOMAIN_EXPLORE
+        assert result is None
 
-    def test_exit_condition_domain_explore_met(self):
+    def test_exit_condition_domain_explore_not_auto(self):
+        """evaluate() no longer triggers auto phase transitions; returns None."""
         engine = PhaseEngine()
         ctx = make_context()
         ctx.current_phase = Phase.DOMAIN_EXPLORE
@@ -107,22 +111,22 @@ class TestPhaseEngine:
                 )
             )
         result = engine.evaluate(ctx, "")
-        assert result == Phase.MODEL_DESIGN
+        assert result is None
 
-    def test_requirement_change_rollback_sets_phase_before_change(self):
+    def test_requirement_change_signal_returns_none(self):
+        """evaluate() no longer handles rollback; requirement change signals are no-ops."""
         engine = PhaseEngine()
         ctx = make_context()
         ctx.current_phase = Phase.DOMAIN_EXPLORE
         result = engine.evaluate(ctx, "还有一个需求，我们需要退款功能")
-        assert result == Phase.REQUIREMENT
-        assert ctx.phase_before_change == Phase.DOMAIN_EXPLORE
+        assert result is None
 
-    def test_no_rollback_in_icebreak_phase(self):
+    def test_unrecognised_message_returns_none(self):
         engine = PhaseEngine()
         ctx = make_context()
         ctx.current_phase = Phase.ICEBREAK
         result = engine.evaluate(ctx, "还有一个需求")
-        assert result is None  # ICEBREAK not in rollback-enabled phases
+        assert result is None
 
     def test_advance_phase_records_transition(self):
         engine = PhaseEngine()
@@ -369,31 +373,6 @@ class TestPhaseDocumentRenderer:
         doc = renderer.render(ctx)
         assert "领域模型草稿" in doc
         assert "订单上下文" in doc
-
-    def test_render_doc_generate_no_docs(self):
-        renderer = PhaseDocumentRenderer()
-        ctx = make_context()
-        ctx.current_phase = Phase.DOC_GENERATE
-        doc = renderer.render(ctx)
-        assert "已生成文档列表" in doc
-        assert "尚未生成任何文档" in doc
-
-    def test_render_doc_generate_with_docs(self):
-        renderer = PhaseDocumentRenderer()
-        ctx = make_context()
-        ctx.current_phase = Phase.DOC_GENERATE
-        ctx.generated_documents.append(
-            DocumentRef(document_type="DOMAIN_MODEL", status=DocumentStatus.CURRENT)
-        )
-        ctx.generated_documents.append(
-            DocumentRef(
-                document_type="BUSINESS_REQUIREMENT", status=DocumentStatus.STALE
-            )
-        )
-        doc = renderer.render(ctx)
-        assert "DOMAIN_MODEL" in doc
-        assert "BUSINESS_REQUIREMENT" in doc
-        assert "需更新" in doc
 
     def test_render_review_refine(self):
         renderer = PhaseDocumentRenderer()

@@ -12,6 +12,11 @@ const DOC_TYPE_LABELS: Record<string, string> = {
   UBIQUITOUS_LANGUAGE: '通用语言术语表',
   USE_CASES: '用例说明文档',
   TECH_ARCHITECTURE: '技术架构文档',
+  PHASE_ICEBREAK: '项目简介',
+  PHASE_REQUIREMENT: '业务需求草稿',
+  PHASE_DOMAIN_EXPLORE: '领域概念词汇表',
+  PHASE_MODEL_DESIGN: '领域模型草稿',
+  PHASE_REVIEW_REFINE: '审阅完善记录',
 }
 
 interface UserInfo {

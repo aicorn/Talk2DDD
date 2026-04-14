@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import re
 import uuid as _uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -12,14 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.context import (
     AgentContext,
-    DocumentType,
     Phase,
     PHASE_LABELS,
     PHASE_PROGRESS,
     TechStackPreferences,
 )
 from app.agent.context_manager import ContextManager
-from app.agent.document_pipeline import DocumentGenerationPipeline
 from app.agent.knowledge_extractor import KnowledgeExtractor
 from app.agent.memory_manager import MemoryManager
 from app.agent.phase_document_renderer import PhaseDocumentRenderer
@@ -47,8 +44,6 @@ class AgentResponse:
     suggestions: List[str]
     extracted_concepts: List[Dict[str, Any]]
     requirement_changes: List[Dict[str, Any]]
-    stale_documents: List[str]
-    pending_documents: List[str]
     phase_document: Optional[PhaseDocumentResult]
     tech_stack_preferences: Optional[Dict[str, Any]] = None
     phase_changed: bool = False
@@ -75,27 +70,13 @@ _PHASE_SUGGESTIONS: dict[Phase, List[str]] = {
     Phase.MODEL_DESIGN: [
         "这些概念是否应该归属同一个聚合？",
         "输入 /techstack 设置技术栈偏好",
-        "输入 /next 进入文档生成阶段",
-        "输入 /generate 直接生成文档",
-    ],
-    Phase.DOC_GENERATE: [
-        "点击下方按钮生成「领域模型文档」",
-        "点击下方按钮生成「业务需求文档」",
         "输入 /next 进入审阅完善阶段",
     ],
     Phase.REVIEW_REFINE: [
-        "请审阅已生成的文档，提出修改意见",
-        "输入 /regenerate [文档类型] 重新生成",
+        "请在「我的项目」中审阅各阶段文档",
+        "如需修改，请直接描述修改内容",
         "输入 /complete 标记项目完成",
     ],
-}
-
-_DOC_TYPE_LABELS: dict[str, str] = {
-    "BUSINESS_REQUIREMENT": "业务需求文档",
-    "DOMAIN_MODEL": "领域模型文档",
-    "UBIQUITOUS_LANGUAGE": "通用语言术语表",
-    "USE_CASES": "用例说明",
-    "TECH_ARCHITECTURE": "技术架构建议",
 }
 
 # Per-phase trigger messages sent as the user turn when the user manually
@@ -121,24 +102,12 @@ _PHASE_SWITCH_TRIGGERS: dict[Phase, str] = {
         "请简短告知此阶段目标（设计聚合、划定限界上下文），总结已有概念，"
         "并提出第一个聚合边界问题。"
     ),
-    Phase.DOC_GENERATE: (
-        "[系统] 用户手动进入「文档生成」阶段（P5）。"
-        "请简短告知此阶段目标，列出可以生成的文档类型，"
-        "并引导用户通过页面按钮生成文档（勿在对话中输出文档全文）。"
-    ),
     Phase.REVIEW_REFINE: (
-        "[系统] 用户手动进入「审阅完善」阶段（P6）。"
-        "请简短告知此阶段目标（审阅文档、收集反馈），"
-        "告知用户可以提出修改意见或用 /regenerate 重新生成某类文档。"
+        "[系统] 用户手动进入「审阅完善」阶段（P5）。"
+        "请简短告知此阶段目标（审阅各阶段文档、收集反馈），"
+        "告知用户可以在「我的项目」中查阅最新文档，并提出修改意见。"
     ),
 }
-
-# Matches "/generate [DOC_TYPE]" — these commands trigger the document pipeline
-# directly to avoid long AI responses in the chat endpoint.
-_GENERATE_DOC_RE = re.compile(
-    r"/generate\s+(BUSINESS_REQUIREMENT|DOMAIN_MODEL|UBIQUITOUS_LANGUAGE|USE_CASES|TECH_ARCHITECTURE)",
-    re.IGNORECASE,
-)
 
 
 class AgentCore:
@@ -151,7 +120,6 @@ class AgentCore:
         self._prompt_builder = PromptBuilder()
         self._knowledge_extractor = KnowledgeExtractor()
         self._doc_renderer = PhaseDocumentRenderer()
-        self._doc_pipeline = DocumentGenerationPipeline()
 
     async def chat(
         self,
@@ -173,22 +141,6 @@ class AgentCore:
             phase_transition_reason = f"auto: {ctx.current_phase.value} → {new_phase.value}"
             self._phase_engine.advance_phase(ctx, new_phase, phase_transition_reason)
 
-        # 2b. Intercept "/generate [DOC_TYPE]" — call the document pipeline directly
-        #     instead of sending the command to the chat AI. The chat AI would try to
-        #     output the full document as its reply (thousands of tokens), which causes
-        #     the Next.js proxy to ECONNRESET before the backend finishes responding.
-        gen_match = _GENERATE_DOC_RE.search(message)
-        if gen_match:
-            doc_type_str = gen_match.group(1).upper()
-            try:
-                doc_type = DocumentType(doc_type_str)
-            except ValueError:
-                doc_type = None
-            if doc_type is not None:
-                return await self._handle_generate_command(
-                    ctx, session_id, message, doc_type, db, provider
-                )
-
         # 3. Build system prompt (with optional rolling summary – Layer 2)
         summary_block = self._memory_manager.get_summary_block(ctx)
         system_prompt = self._prompt_builder.build(ctx, memory_summary_block=summary_block)
@@ -204,10 +156,6 @@ class AgentCore:
         # 5. Extract knowledge from AI reply
         prev_ts_confirmed = ctx.tech_stack_preferences.confirmed
         self._knowledge_extractor.extract(ai_reply, ctx)
-
-        # 5b. If tech stack just got confirmed/changed, mark TECH_ARCHITECTURE as stale
-        if ctx.tech_stack_preferences.confirmed and not prev_ts_confirmed:
-            ctx.mark_documents_stale(["TECH_ARCHITECTURE"])
 
         # 6. Increment turn counter
         ctx.turn_count += 1
@@ -227,12 +175,21 @@ class AgentCore:
         await self._context_manager.save(ctx, db)
         await self._context_manager.append_messages(session_id, message, ai_reply, db)
 
-        # 9. Trigger async memory compression if threshold reached (Layer 2).
+        # 9. Auto-save phase document to project (non-fatal)
+        await self._save_phase_document_to_project(
+            session_id=session_id,
+            ctx=ctx,
+            phase=ctx.current_phase,
+            content=phase_doc_content,
+            db=db,
+        )
+
+        # 10. Trigger async memory compression if threshold reached (Layer 2).
         #     The background task opens its own DB session so the request-scoped
         #     session (now committed) is never touched after this point.
         await self._memory_manager.maybe_compress(ctx, provider=provider)
 
-        # 10. Build response
+        # 11. Build response
         return AgentResponse(
             reply=ai_reply,
             session_id=session_id,
@@ -242,56 +199,9 @@ class AgentCore:
             suggestions=_PHASE_SUGGESTIONS.get(ctx.current_phase, []),
             extracted_concepts=self._format_concepts(ctx),
             requirement_changes=self._format_requirement_changes(ctx),
-            stale_documents=ctx.get_stale_documents(),
-            pending_documents=self._pending_document_types(ctx),
             phase_document=phase_doc,
             tech_stack_preferences=self._format_tech_stack(ctx),
         )
-
-    async def generate_document(
-        self,
-        session_id: str,
-        document_type: str,
-        db: AsyncSession,
-        project_id: Optional[str] = None,
-        provider: Optional[str] = None,
-    ) -> tuple[str, str, Optional[str]]:
-        """Generate a DDD document and return (content, version_id, project_id).
-
-        Also updates the AgentContext to record the generated document and
-        persists the content as a DocumentVersion record linked to a Project.
-        A Project is auto-created from the conversation's domain knowledge if
-        one doesn't already exist.
-        """
-        ctx = await self._context_manager.load(session_id, db, project_id)
-
-        try:
-            doc_type = DocumentType(document_type)
-        except ValueError:
-            raise ValueError(
-                f"Unsupported document type '{document_type}'. "
-                f"Supported: {[d.value for d in DocumentType]}"
-            )
-
-        content = await self._doc_pipeline.generate(ctx, doc_type, provider=provider)
-
-        # Record the generated document in context
-        version_id = str(_uuid.uuid4())
-        ctx.add_document_ref(doc_type.value, version_id)
-        ctx.turn_count += 1
-
-        # Persist to DB: ensure a Project exists and save DocumentVersion
-        resolved_project_id = await self._save_document_version(
-            session_id=session_id,
-            ctx=ctx,
-            doc_type=doc_type,
-            content=content,
-            version_id=version_id,
-            db=db,
-        )
-
-        await self._context_manager.save(ctx, db)
-        return content, version_id, resolved_project_id
 
     async def switch_phase(
         self,
@@ -371,10 +281,19 @@ class AgentCore:
         await self._context_manager.save(ctx, db)
         await self._context_manager.append_assistant_only(session_id, ai_reply, db)
 
-        # 10. Async memory compression (does not block response)
+        # 10. Auto-save phase document to project (non-fatal)
+        await self._save_phase_document_to_project(
+            session_id=session_id,
+            ctx=ctx,
+            phase=ctx.current_phase,
+            content=phase_doc_content,
+            db=db,
+        )
+
+        # 11. Async memory compression (does not block response)
         await self._memory_manager.maybe_compress(ctx, provider=provider)
 
-        # 11. Build and return response
+        # 12. Build and return response
         return AgentResponse(
             reply=ai_reply,
             session_id=session_id,
@@ -384,29 +303,35 @@ class AgentCore:
             suggestions=_PHASE_SUGGESTIONS.get(ctx.current_phase, []),
             extracted_concepts=self._format_concepts(ctx),
             requirement_changes=self._format_requirement_changes(ctx),
-            stale_documents=ctx.get_stale_documents(),
-            pending_documents=self._pending_document_types(ctx),
             phase_document=phase_doc,
             tech_stack_preferences=self._format_tech_stack(ctx),
             phase_changed=True,
         )
 
-    async def _save_document_version(
+    async def _save_phase_document_to_project(
         self,
         session_id: str,
         ctx: AgentContext,
-        doc_type: DocumentType,
+        phase: Phase,
         content: str,
-        version_id: str,
         db: AsyncSession,
     ) -> Optional[str]:
-        """Ensure a Project exists for this session and persist the DocumentVersion.
+        """Save the current phase document to the linked project as a DocumentVersion.
 
-        Returns the project_id (str) that was used, or None on error.
+        Uses overwrite semantics: the previous version of the same phase document
+        is marked ``is_current=False``, and a new version is inserted.  A Project
+        is auto-created from domain knowledge if the conversation has none yet.
+
+        Returns the project_id (str) that was used, or None if skipped / on error.
         """
         from sqlalchemy import select, func
         from app.models.conversation import Conversation
         from app.models.document import Project, DocumentVersion
+
+        if not content.strip():
+            return None
+
+        doc_type_str = f"PHASE_{phase.value}"
 
         try:
             conv_uuid = _uuid.UUID(session_id)
@@ -436,24 +361,28 @@ class AgentCore:
                 db.add(project)
                 await db.flush()
                 conv.project_id = project.id
+                ctx.project_id = str(project.id)
                 project_id_uuid = project.id
             else:
                 project_id_uuid = conv.project_id
+                # Keep ctx.project_id in sync
+                if ctx.project_id is None:
+                    ctx.project_id = str(project_id_uuid)
 
-            # Determine next version number for this doc type in the project
+            # Determine version number for this phase document type
             count_result = await db.execute(
                 select(func.count()).select_from(DocumentVersion).where(
                     DocumentVersion.project_id == project_id_uuid,
-                    DocumentVersion.document_type == doc_type.value,
+                    DocumentVersion.document_type == doc_type_str,
                 )
             )
             existing_count = count_result.scalar() or 0
 
-            # Mark previous versions of the same type as not current
+            # Mark previous versions of the same phase as not current
             prev_result = await db.execute(
                 select(DocumentVersion).where(
                     DocumentVersion.project_id == project_id_uuid,
-                    DocumentVersion.document_type == doc_type.value,
+                    DocumentVersion.document_type == doc_type_str,
                     DocumentVersion.is_current == True,  # noqa: E712
                 )
             )
@@ -461,11 +390,11 @@ class AgentCore:
                 old_ver.is_current = False
 
             doc_ver = DocumentVersion(
-                id=_uuid.UUID(version_id),
+                id=_uuid.uuid4(),
                 project_id=project_id_uuid,
                 version_number=existing_count + 1,
                 content=content,
-                document_type=doc_type.value,
+                document_type=doc_type_str,
                 is_current=True,
                 staleness_status="CURRENT",
             )
@@ -473,81 +402,17 @@ class AgentCore:
             await db.flush()
             return str(project_id_uuid)
         except Exception:
-            # Non-fatal: log but don't fail document generation
             import logging
             logging.getLogger(__name__).exception(
-                "Failed to persist DocumentVersion for session %s", session_id
+                "Failed to save phase document for session %s phase %s",
+                session_id,
+                phase.value,
             )
             return None
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
-
-    async def _handle_generate_command(
-        self,
-        ctx: AgentContext,
-        session_id: str,
-        user_message: str,
-        doc_type: DocumentType,
-        db: AsyncSession,
-        provider: Optional[str],
-    ) -> AgentResponse:
-        """Handle a /generate [DOC_TYPE] command inside the chat turn.
-
-        Calls the document pipeline directly (skipping the chat AI) so the
-        chat endpoint returns quickly.  The generated document is surfaced in
-        ``phase_document`` so the frontend can display it in the side panel.
-        """
-        doc_label = _DOC_TYPE_LABELS.get(doc_type.value, doc_type.value)
-
-        content = await self._doc_pipeline.generate(ctx, doc_type, provider=provider)
-
-        # Record the document in context (same as generate_document())
-        version_id = str(_uuid.uuid4())
-        ctx.add_document_ref(doc_type.value, version_id)
-        ctx.turn_count += 1
-
-        # Persist to DB
-        await self._save_document_version(
-            session_id=session_id,
-            ctx=ctx,
-            doc_type=doc_type,
-            content=content,
-            version_id=version_id,
-            db=db,
-        )
-
-        ai_reply = (
-            f"✅ **{doc_label}**已生成完毕，并已保存到「我的项目」！请查看右侧文档面板。\n\n"
-            "您可以继续生成其他类型文档，或输入 `/next` 进入审阅完善阶段。"
-        )
-
-        phase_doc = PhaseDocumentResult(
-            phase=ctx.current_phase.value,
-            title=doc_label,
-            content=content,
-            rendered_at=datetime.now(timezone.utc),
-            turn_count=ctx.turn_count,
-        )
-
-        await self._context_manager.save(ctx, db)
-        await self._context_manager.append_messages(session_id, user_message, ai_reply, db)
-
-        return AgentResponse(
-            reply=ai_reply,
-            session_id=session_id,
-            phase=ctx.current_phase.value,
-            phase_label=PHASE_LABELS.get(ctx.current_phase, ctx.current_phase.value),
-            progress=PHASE_PROGRESS.get(ctx.current_phase, 0.0),
-            suggestions=_PHASE_SUGGESTIONS.get(ctx.current_phase, []),
-            extracted_concepts=self._format_concepts(ctx),
-            requirement_changes=self._format_requirement_changes(ctx),
-            stale_documents=ctx.get_stale_documents(),
-            pending_documents=self._pending_document_types(ctx),
-            phase_document=phase_doc,
-            tech_stack_preferences=self._format_tech_stack(ctx),
-        )
 
     def _format_concepts(self, ctx: AgentContext) -> List[Dict[str, Any]]:
         return [
@@ -568,19 +433,6 @@ class AgentCore:
                 "affected_documents": c.affected_documents,
             }
             for c in ctx.requirement_changes[-5:]
-        ]
-
-    def _pending_document_types(self, ctx: AgentContext) -> List[str]:
-        """Return document types that are ready to generate but not yet generated."""
-        if ctx.current_phase.value not in {"DOC_GENERATE", "REVIEW_REFINE"}:
-            return []
-        generated_types = {
-            d.document_type for d in ctx.generated_documents
-        }
-        return [
-            dt.value
-            for dt in DocumentType
-            if dt.value not in generated_types
         ]
 
     def _format_tech_stack(self, ctx: AgentContext) -> Optional[Dict[str, Any]]:
