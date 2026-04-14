@@ -2034,3 +2034,81 @@ POST /api/v1/agent/switch-phase
 | 里程碑 | 内容 | 优先级 |
 |--------|------|--------|
 | M16 | **阶段导航按钮**：前端「上一阶段/下一阶段」按钮 + `POST /api/v1/agent/switch-phase` 端点 + `phase_switch_trigger` 指令块 + 阶段切换系统通知气泡 | 🔴 高 |
+
+---
+
+## 20. P2 双角色场景提取机制（Dual-Role Scenario Extraction）
+
+### 20.1 问题背景
+
+在第二阶段（需求收集 P2）中，对话型 AI 有时会在回复正文中描述或讨论业务场景，但未能同步嵌入对应的 `<scenario>` XML 标记。这导致 `KnowledgeExtractor` 无法从回复中提取到这些场景，最终造成**对话中显示的业务项**与**阶段文档中记录的业务项**不一致。
+
+### 20.2 设计方案：双角色模式
+
+为解决上述问题，在 P2 阶段的每轮对话结束后，引入一个独立的**"场景提取器"角色**（Extractor Role）。两个角色各司其职：
+
+| 角色 | 职责 | AI 调用 | 输出格式 |
+|------|------|---------|----------|
+| **对话者（Conversational Role）** | 理解用户意图、推进需求收集对话、引导深挖边界场景 | 第 1 次 AI 调用（现有流程） | 自然语言回复 + 可选 `<scenario>` XML 标记 |
+| **提取器（Extractor Role）** | 从本轮对话片段中识别**所有**业务场景并结构化输出 | 第 2 次 AI 调用（新增） | 纯 JSON 数组 |
+
+### 20.3 时序流程
+
+```
+用户消息
+    │
+    ▼
+[第 1 次 AI 调用] 对话者角色
+    │  system prompt = PromptBuilder.build()（含完整阶段指令）
+    │  → 自然语言回复 + 可选 <scenario> 标记
+    │
+    ▼
+KnowledgeExtractor.extract(ai_reply, ctx)   ← XML 标记提取（原有）
+    │
+    ▼
+[第 2 次 AI 调用] 提取器角色（仅 P2 阶段）
+    │  user prompt = PromptBuilder.build_scenario_extraction_prompt()
+    │    ┌─ 本轮 user_message
+    │    ├─ 本轮 ai_reply
+    │    └─ ctx 中现有 business_scenarios（避免重复）
+    │  → 纯 JSON 数组
+    │
+    ▼
+KnowledgeExtractor.merge_scenarios_from_json(json_reply, ctx)
+    │  • 已存在同名场景 → 补充空描述（不覆盖）
+    │  • 新场景 → 追加到 ctx.domain_knowledge.business_scenarios
+    │
+    ▼
+PhaseDocumentRenderer.render(ctx)  ← 阶段文档包含全部已对齐场景
+```
+
+### 20.4 实现细节
+
+#### PromptBuilder.build_scenario_extraction_prompt()
+- 输入：`ctx`（含现有场景列表）、`user_message`、`ai_reply`
+- 输出：单条 `user` 角色消息字符串，指令简洁，要求只返回 JSON 数组
+- 现有场景以 JSON 格式列出，提示提取器不重复添加但可补充描述
+
+#### KnowledgeExtractor.merge_scenarios_from_json()
+- 容错地从文本中提取第一个 JSON 数组（支持 AI 偶尔夹杂无关文字的情况）
+- 按场景 name 去重：同名场景仅补充空描述，不覆盖已有数据
+- 解决 id 冲突：新场景若与现有 id 重复，自动分配新 id
+- 返回新增场景数量（用于日志和测试断言）
+
+#### AgentCore._reconcile_scenarios()
+- 在 `chat()` 方法步骤 5（XML 提取）之后、步骤 7（文档渲染）之前调用
+- 仅在 `ctx.current_phase == Phase.REQUIREMENT` 时触发
+- 任何异常均静默记录为 DEBUG 日志，不影响主流程响应
+
+### 20.5 性能考量
+
+第 2 次 AI 调用使用专注的短 prompt（无完整系统提示、无历史消息），推理 token 消耗远低于主对话调用。可以通过以下策略进一步优化：
+
+- **条件触发**：若第 1 次 AI 回复已包含 `<scenario>` 标记且数量与对话内容一致，可跳过第 2 次调用（未来优化项）。
+- **低优先级模型**：提取器调用可配置为使用响应更快、成本更低的 AI 模型（未来优化项）。
+
+### 20.6 §15 补充：实现路线图新增里程碑
+
+| 里程碑 | 内容 | 优先级 |
+|--------|------|--------|
+| M17 | **P2 双角色场景提取**：`build_scenario_extraction_prompt()` + `merge_scenarios_from_json()` + `_reconcile_scenarios()` + 加强版 P2 系统提示 | 🔴 高 |

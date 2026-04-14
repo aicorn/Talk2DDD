@@ -74,7 +74,11 @@ _PHASE_INSTRUCTIONS: dict[Phase, str] = {
 3. 每次聚焦一个业务场景，深入挖掘细节
 4. 至少收集 3 个核心业务场景后，告知用户条件已满足，提示点击「下一阶段 →」按钮进入领域探索阶段（不要自动切换阶段）
 
-当识别到业务场景时，嵌入 <scenario> 标记。""",
+【重要】嵌入规则：
+- 每当在对话中提到或讨论任何业务场景时，**必须**在回复末尾嵌入对应的 <scenario> 标记，不可遗漏。
+- 若同一回复中涉及多个场景，每个场景各嵌入一个 <scenario> 标记。
+- 若用户对已有场景进行补充说明，使用该场景已有的 id，用更新后的描述重新嵌入标记。
+- 若当前轮次未涉及任何业务场景，则不需要嵌入任何 <scenario> 标记。""",
 
     Phase.DOMAIN_EXPLORE: """【当前阶段：领域探索 P3/5】
 目标：从需求中提炼领域术语，建立通用语言
@@ -254,6 +258,48 @@ class PromptBuilder:
         lines.append("[/CONTEXT_BLOCK]")
 
         return "\n".join(lines)
+
+    def build_scenario_extraction_prompt(
+        self,
+        ctx: AgentContext,
+        user_message: str,
+        ai_reply: str,
+    ) -> str:
+        """Build a focused extraction prompt for the dedicated scenario extractor.
+
+        This prompt is sent as a second, lightweight AI call whose sole
+        responsibility is to identify ALL business scenarios mentioned in the
+        current exchange and return them as a JSON array.  The result is then
+        merged into ``ctx.domain_knowledge.business_scenarios`` so that the
+        phase document stays in sync with the conversational content.
+
+        Returns a single user-role message string.
+        """
+        existing = ctx.domain_knowledge.business_scenarios
+        if existing:
+            existing_lines = "\n".join(
+                f'  {{"id": "{s.id}", "name": "{s.name}", "description": "{s.description}"}}'
+                for s in existing
+            )
+            existing_block = f"已有业务场景（请勿重复，但可补充描述）：\n[\n{existing_lines}\n]"
+        else:
+            existing_block = "已有业务场景：[]（尚无）"
+
+        return (
+            "你是业务场景提取助手，负责从对话片段中识别并结构化业务场景。\n\n"
+            f"{existing_block}\n\n"
+            "请从下面这轮对话中提取**所有**提到或讨论过的业务场景（包括已有场景的补充信息），"
+            "以 JSON 数组格式返回。每个元素包含：\n"
+            '  - "id"：场景编号（已有场景保持原 id；新场景使用 S001、S002 等格式，'
+            "若与已有 id 冲突则系统会自动重新分配，无需担心）\n"
+            '  - "name"：简洁动宾短语（如"用户注册"、"订单审批"）\n'
+            '  - "description"：1~2 句描述\n\n'
+            "如果本轮对话未涉及任何业务场景，返回空数组 []。\n"
+            "只返回 JSON 数组，不要任何其他文字或 Markdown 标记。\n\n"
+            "---\n"
+            f"用户说：\n{user_message}\n\n"
+            f"AI 回复：\n{ai_reply}"
+        )
 
     def build_tech_stack_block(self, ctx: AgentContext) -> str:
         """Return a [TECH_STACK_BLOCK] for TECH_ARCHITECTURE document generation.

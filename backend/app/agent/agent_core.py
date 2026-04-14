@@ -157,6 +157,17 @@ class AgentCore:
         prev_ts_confirmed = ctx.tech_stack_preferences.confirmed
         self._knowledge_extractor.extract(ai_reply, ctx)
 
+        # 5b. In the REQUIREMENT phase, run a dedicated scenario-extraction pass to
+        #     ensure all business items discussed in the conversation are captured in
+        #     the context even when the conversational AI omitted <scenario> tags.
+        if ctx.current_phase == Phase.REQUIREMENT:
+            await self._reconcile_scenarios(
+                ctx=ctx,
+                user_message=message,
+                ai_reply=ai_reply,
+                provider=provider,
+            )
+
         # 6. Increment turn counter
         ctx.turn_count += 1
 
@@ -307,6 +318,41 @@ class AgentCore:
             tech_stack_preferences=self._format_tech_stack(ctx),
             phase_changed=True,
         )
+
+    async def _reconcile_scenarios(
+        self,
+        ctx: AgentContext,
+        user_message: str,
+        ai_reply: str,
+        provider: Optional[str] = None,
+    ) -> None:
+        """Run a dedicated extractor AI call to reconcile business scenarios.
+
+        This is the "Extractor Role" in the dual-role pattern for Phase 2.
+        After the main conversational AI response has been processed, a second
+        lightweight AI call is made whose only job is to identify ALL business
+        scenarios mentioned in the current exchange and return them as JSON.
+        The result is merged into ``ctx.domain_knowledge.business_scenarios``
+        so the phase document is always in sync with what was discussed.
+
+        This call is non-fatal: any exception is silently logged and the
+        regular flow continues uninterrupted.
+        """
+        import logging as _logging
+
+        try:
+            extraction_prompt = self._prompt_builder.build_scenario_extraction_prompt(
+                ctx, user_message, ai_reply
+            )
+            messages = [{"role": "user", "content": extraction_prompt}]
+            json_reply = await chat_completion(messages=messages, provider=provider)
+            self._knowledge_extractor.merge_scenarios_from_json(json_reply, ctx)
+        except Exception:
+            _logging.getLogger(__name__).debug(
+                "Scenario reconciliation failed for session %s (non-fatal)",
+                ctx.session_id,
+                exc_info=True,
+            )
 
     async def _save_phase_document_to_project(
         self,
