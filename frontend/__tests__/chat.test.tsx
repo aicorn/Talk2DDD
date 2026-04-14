@@ -272,5 +272,49 @@ describe('ChatPage', () => {
     fireEvent.click(screen.getByLabelText('toggle phase document'))
     expect(screen.queryByLabelText('phase document panel')).not.toBeInTheDocument()
   })
+
+  it('switches phase using the async polling approach', async () => {
+    const phaseReply = agentReply('欢迎进入需求收集阶段！', {
+      phase: 'REQUIREMENT',
+      phase_label: '需求收集',
+      progress: 0.2,
+    })
+
+    ;(global.fetch as jest.Mock)
+      // pre-fetch phase document call
+      .mockResolvedValueOnce({ ok: false })
+      // POST /switch-phase/async → task_id
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ task_id: MOCK_TASK_ID, status: 'pending' }),
+      })
+      // GET /tasks/{id} → completed
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          task_id: MOCK_TASK_ID,
+          status: 'completed',
+          result: phaseReply,
+          error: null,
+        }),
+      })
+
+    render(<ChatPage />)
+
+    const nextBtn = screen.getByRole('button', { name: '下一阶段' })
+    fireEvent.click(nextBtn)
+
+    await waitFor(() => {
+      const calls = (global.fetch as jest.Mock).mock.calls
+      const switchCall = calls.find((c: string[]) => c[0]?.includes('/switch-phase/async'))
+      expect(switchCall).toBeDefined()
+    })
+
+    await waitFor(() => {
+      const calls = (global.fetch as jest.Mock).mock.calls
+      const pollCall = calls.find((c: string[]) => c[0]?.includes(`/tasks/${MOCK_TASK_ID}`))
+      expect(pollCall).toBeDefined()
+    })
+  })
 })
 

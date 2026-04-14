@@ -270,6 +270,52 @@ async def _run_chat_task(
         task_store.set_error(task_id, "服务器内部错误，请稍后重试")
 
 
+async def _run_switch_phase_task(
+    task_id: str,
+    request: SwitchPhaseRequest,
+    user_id: _uuid.UUID,
+) -> None:
+    """Background coroutine: run switch_phase and store result in the task store.
+
+    Opens its own database session so it can outlive the originating request.
+    """
+    from app.database.session import AsyncSessionLocal
+
+    task_store = get_task_store()
+    try:
+        async with AsyncSessionLocal() as db:
+            try:
+                await _ensure_conversation(request.session_id, user_id, None, db)
+                result = await _agent_core.switch_phase(
+                    session_id=request.session_id,
+                    direction=request.direction,
+                    db=db,
+                    provider=request.provider,
+                )
+                await db.commit()
+            except ValueError as exc:
+                await db.rollback()
+                task_store.set_error(task_id, str(exc))
+                return
+            except (openai.OpenAIError, RuntimeError) as exc:
+                await db.rollback()
+                task_store.set_error(task_id, _friendly_ai_error(exc))
+                return
+            except Exception as exc:
+                await db.rollback()
+                logger.exception(
+                    "Unhandled error in async switch-phase task %s: %s", task_id, exc
+                )
+                task_store.set_error(task_id, "服务器内部错误，请稍后重试")
+                return
+        task_store.set_result(task_id, _build_agent_response_dict(result))
+    except Exception as exc:
+        logger.exception(
+            "Unexpected error in _run_switch_phase_task %s: %s", task_id, exc
+        )
+        task_store.set_error(task_id, "服务器内部错误，请稍后重试")
+
+
 # ---------------------------------------------------------------------------
 # POST /chat/async
 # ---------------------------------------------------------------------------
@@ -295,6 +341,32 @@ async def agent_chat_async(
     task_store = get_task_store()
     task_id = task_store.create()
     _asyncio.create_task(_run_chat_task(task_id, request, current_user.id))
+    return AsyncChatStartResponse(task_id=task_id)
+
+
+# ---------------------------------------------------------------------------
+# POST /switch-phase/async
+# ---------------------------------------------------------------------------
+
+
+@router.post("/switch-phase/async", response_model=AsyncChatStartResponse, status_code=202)
+async def switch_phase_async(
+    request: SwitchPhaseRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AsyncChatStartResponse:
+    """Submit a phase-switch request for async processing.
+
+    Returns immediately with a ``task_id``.  The caller should poll
+    ``GET /tasks/{task_id}`` until ``status`` is ``"completed"`` or
+    ``"failed"``.
+    """
+    await _ensure_conversation(request.session_id, current_user.id, None, db)
+    await db.commit()
+
+    task_store = get_task_store()
+    task_id = task_store.create()
+    _asyncio.create_task(_run_switch_phase_task(task_id, request, current_user.id))
     return AsyncChatStartResponse(task_id=task_id)
 
 

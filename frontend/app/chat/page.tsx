@@ -551,8 +551,9 @@ export default function ChatPage() {
     }
 
     try {
-      const res = await fetchWithTimeout(
-        `${API_URL}/api/v1/agent/switch-phase`,
+      // Step 1: submit the phase-switch task and receive a task ID immediately.
+      const startRes = await fetchWithTimeout(
+        `${API_URL}/api/v1/agent/switch-phase/async`,
         {
           method: 'POST',
           headers: {
@@ -564,12 +565,18 @@ export default function ChatPage() {
         fetchTimeoutMs.current,
       )
 
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}))
-        throw new Error(parseApiError(res, data))
+      if (!startRes.ok) {
+        const data = await startRes.json().catch(() => ({}))
+        throw new Error(parseApiError(startRes, data))
       }
 
-      const data: AgentChatResponse = await res.json()
+      const startData: { task_id: string; status: string } = await startRes.json()
+
+      // Step 2: poll until the task completes (or times out / fails).
+      const controller = new AbortController()
+      pollingControllerRef.current = controller
+      const data: AgentChatResponse = await pollTaskResult(startData.task_id, controller.signal)
+      pollingControllerRef.current = null
 
       // Insert a system notification banner followed by the AI intro message
       const phaseLabel = data.phase_label ?? data.phase
@@ -598,9 +605,12 @@ export default function ChatPage() {
       }
       setShowPhaseDoc(true)
     } catch (err: unknown) {
+      // Silently ignore AbortError — component was unmounted during polling.
+      if (err instanceof DOMException && err.name === 'AbortError') return
+
       const isTimeout = err instanceof DOMException && err.name === 'TimeoutError'
       const msg = isTimeout
-        ? `阶段切换请求超时（等待 ${Math.round(fetchTimeoutMs.current / 1000)} 秒无响应），请重试`
+        ? err.message
         : err instanceof Error
           ? err.message
           : '阶段切换失败，请重试'
