@@ -757,7 +757,7 @@ export default function ChatPage() {
                 <a
                   href="/projects"
                   className="text-blue-500 hover:text-blue-700 hover:underline"
-                  aria-label="view my projects"
+                  aria-label="查看我的项目"
                 >
                   查看我的项目 →
                 </a>

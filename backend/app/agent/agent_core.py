@@ -331,7 +331,7 @@ class AgentCore:
         if not content.strip():
             return None
 
-        doc_type_str = f"PHASE_{phase.value}"
+        phase_doc_type = f"PHASE_{phase.value}"
 
         try:
             conv_uuid = _uuid.UUID(session_id)
@@ -373,7 +373,7 @@ class AgentCore:
             count_result = await db.execute(
                 select(func.count()).select_from(DocumentVersion).where(
                     DocumentVersion.project_id == project_id_uuid,
-                    DocumentVersion.document_type == doc_type_str,
+                    DocumentVersion.document_type == phase_doc_type,
                 )
             )
             existing_count = count_result.scalar() or 0
@@ -382,7 +382,7 @@ class AgentCore:
             prev_result = await db.execute(
                 select(DocumentVersion).where(
                     DocumentVersion.project_id == project_id_uuid,
-                    DocumentVersion.document_type == doc_type_str,
+                    DocumentVersion.document_type == phase_doc_type,
                     DocumentVersion.is_current == True,  # noqa: E712
                 )
             )
@@ -394,7 +394,7 @@ class AgentCore:
                 project_id=project_id_uuid,
                 version_number=existing_count + 1,
                 content=content,
-                document_type=doc_type_str,
+                document_type=phase_doc_type,
                 is_current=True,
                 staleness_status="CURRENT",
             )
