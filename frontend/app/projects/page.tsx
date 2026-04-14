@@ -126,6 +126,29 @@ export default function ProjectsPage() {
     }
   }
 
+  async function downloadDocument(projectId: string, docId: string, docType: string, versionNumber: number) {
+    try {
+      const res = await fetch(
+        `${API_URL}/api/v1/projects/${projectId}/documents/${docId}/content`,
+        { headers: getAuthHeaders() }
+      )
+      if (!res.ok) return
+      const data = await res.json()
+      const filename = `${DOC_TYPE_LABELS[docType] ?? docType}_v${versionNumber}.md`
+      const blob = new Blob([data.content ?? ''], { type: 'text/markdown;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    } catch {
+      // ignore
+    }
+  }
+
   async function deleteProject(projectId: string) {
     if (!confirm('确认删除此项目及其所有文档？')) return
     setDeletingProject(projectId)
@@ -297,12 +320,21 @@ export default function ProjectsPage() {
                                   {new Date(doc.created_at).toLocaleString('zh-CN')}
                                 </span>
                               </div>
-                              <button
-                                onClick={() => viewDocument(proj.id, doc.id, doc.document_type)}
-                                className="ml-4 px-3 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors shrink-0"
-                              >
-                                查看
-                              </button>
+                              <div className="flex items-center gap-2 ml-4 shrink-0">
+                                <button
+                                  onClick={() => viewDocument(proj.id, doc.id, doc.document_type)}
+                                  className="px-3 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
+                                >
+                                  查看
+                                </button>
+                                <button
+                                  onClick={() => downloadDocument(proj.id, doc.id, doc.document_type, doc.version_number)}
+                                  className="px-3 py-1 text-xs bg-gray-100 text-gray-700 border border-gray-300 rounded hover:bg-gray-200 transition-colors"
+                                  aria-label="下载 Markdown 文件"
+                                >
+                                  ⬇ 下载 .md
+                                </button>
+                              </div>
                             </div>
                           ))}
                       </div>
