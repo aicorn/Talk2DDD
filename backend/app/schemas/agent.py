@@ -107,3 +107,19 @@ class SessionMessageItem(BaseModel):
 class SessionMessagesResponse(BaseModel):
     session_id: str
     messages: List[SessionMessageItem]
+
+
+class AsyncChatStartResponse(BaseModel):
+    """Returned immediately by POST /chat/async; contains the task ID to poll."""
+
+    task_id: str
+    status: str = "pending"
+
+
+class TaskStatusResponse(BaseModel):
+    """Returned by GET /tasks/{task_id} while the frontend polls for a result."""
+
+    task_id: str
+    status: str  # "pending" | "completed" | "failed"
+    result: Optional[AgentChatResponse] = None
+    error: Optional[str] = None

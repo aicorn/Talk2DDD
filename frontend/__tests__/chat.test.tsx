@@ -21,6 +21,7 @@ global.fetch = jest.fn()
 
 // Deterministic session ID in tests
 const MOCK_SESSION_ID = '00000000-0000-4000-8000-000000000001'
+const MOCK_TASK_ID = 'test-task-00000000-0000-4000-8000-000000000001'
 Object.defineProperty(globalThis, 'crypto', {
   value: { randomUUID: () => MOCK_SESSION_ID },
   writable: true,
@@ -42,6 +43,28 @@ function agentReply(reply: string, overrides: Record<string, unknown> = {}) {
     phase_document: null,
     ...overrides,
   }
+}
+
+/**
+ * Set up the two fetch mocks needed for a successful async chat round-trip:
+ *  1. POST /chat/async  → { task_id, status: "pending" }
+ *  2. GET  /tasks/{id}  → { task_id, status: "completed", result: agentReply(...) }
+ */
+function mockAsyncChat(reply: string, replyOverrides: Record<string, unknown> = {}) {
+  ;(global.fetch as jest.Mock)
+    .mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ task_id: MOCK_TASK_ID, status: 'pending' }),
+    })
+    .mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        task_id: MOCK_TASK_ID,
+        status: 'completed',
+        result: agentReply(reply, replyOverrides),
+        error: null,
+      }),
+    })
 }
 
 beforeEach(() => {
@@ -85,10 +108,7 @@ describe('ChatPage', () => {
   })
 
   it('sends a message and displays the reply', async () => {
-    ;(global.fetch as jest.Mock).mockResolvedValueOnce({
-      ok: true,
-      json: async () => agentReply('Hi there!'),
-    })
+    mockAsyncChat('Hi there!')
 
     render(<ChatPage />)
     const input = screen.getByRole('textbox', { name: 'message input' })
@@ -102,6 +122,7 @@ describe('ChatPage', () => {
   })
 
   it('shows an error message when the API call fails', async () => {
+    // The initial POST /chat/async fails — no poll mock needed.
     ;(global.fetch as jest.Mock).mockResolvedValueOnce({
       ok: false,
       json: async () => ({ detail: 'AI provider error: connection refused' }),
@@ -117,11 +138,35 @@ describe('ChatPage', () => {
     })
   })
 
-  it('calls the agent chat endpoint with session_id and message', async () => {
-    ;(global.fetch as jest.Mock).mockResolvedValueOnce({
-      ok: true,
-      json: async () => agentReply('Agent reply'),
+  it('shows an error message when the task fails during polling', async () => {
+    ;(global.fetch as jest.Mock)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ task_id: MOCK_TASK_ID, status: 'pending' }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          task_id: MOCK_TASK_ID,
+          status: 'failed',
+          result: null,
+          error: 'AI 服务当前繁忙，请稍等几秒后点击「重试」。',
+        }),
+      })
+
+    render(<ChatPage />)
+    fireEvent.change(screen.getByRole('textbox', { name: 'message input' }), {
+      target: { value: 'Hello' },
     })
+    fireEvent.click(screen.getByRole('button', { name: 'send message' }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent('AI 服务当前繁忙')
+    })
+  })
+
+  it('calls the async chat endpoint with session_id and message', async () => {
+    mockAsyncChat('Agent reply')
 
     render(<ChatPage />)
     const input = screen.getByRole('textbox', { name: 'message input' })
@@ -130,19 +175,32 @@ describe('ChatPage', () => {
 
     await waitFor(() => {
       const fetchCall = (global.fetch as jest.Mock).mock.calls[0]
-      expect(fetchCall[0]).toContain('/api/v1/agent/chat')
+      expect(fetchCall[0]).toContain('/api/v1/agent/chat/async')
       const body = JSON.parse(fetchCall[1].body)
       expect(body.session_id).toBe(MOCK_SESSION_ID)
       expect(body.message).toBe('Hello')
     })
   })
 
+  it('polls the tasks endpoint after submitting the chat request', async () => {
+    mockAsyncChat('Agent reply')
+
+    render(<ChatPage />)
+    fireEvent.change(screen.getByRole('textbox', { name: 'message input' }), {
+      target: { value: 'Hello' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'send message' }))
+
+    await waitFor(() => {
+      const calls = (global.fetch as jest.Mock).mock.calls
+      expect(calls.length).toBeGreaterThanOrEqual(2)
+      expect(calls[1][0]).toContain(`/api/v1/agent/tasks/${MOCK_TASK_ID}`)
+    })
+  })
+
   it('calls fetch with the provider from localStorage', async () => {
     window.localStorage.setItem('ai_provider', 'deepseek')
-    ;(global.fetch as jest.Mock).mockResolvedValueOnce({
-      ok: true,
-      json: async () => agentReply('deepseek reply', { phase: 'ICEBREAK' }),
-    })
+    mockAsyncChat('deepseek reply', { phase: 'ICEBREAK' })
 
     render(<ChatPage />)
     const input = screen.getByRole('textbox', { name: 'message input' })
@@ -165,18 +223,14 @@ describe('ChatPage', () => {
   })
 
   it('shows phase document panel after receiving a phase_document in the response', async () => {
-    ;(global.fetch as jest.Mock).mockResolvedValueOnce({
-      ok: true,
-      json: async () =>
-        agentReply('Hello!', {
-          phase_document: {
-            phase: 'ICEBREAK',
-            title: '项目简介',
-            content: '# 项目简介\n\n待填写',
-            rendered_at: new Date().toISOString(),
-            turn_count: 1,
-          },
-        }),
+    mockAsyncChat('Hello!', {
+      phase_document: {
+        phase: 'ICEBREAK',
+        title: '项目简介',
+        content: '# 项目简介\n\n待填写',
+        rendered_at: new Date().toISOString(),
+        turn_count: 1,
+      },
     })
 
     render(<ChatPage />)
@@ -194,18 +248,14 @@ describe('ChatPage', () => {
   })
 
   it('toggle phase document button shows/hides the panel', async () => {
-    ;(global.fetch as jest.Mock).mockResolvedValueOnce({
-      ok: true,
-      json: async () =>
-        agentReply('Hello!', {
-          phase_document: {
-            phase: 'ICEBREAK',
-            title: '项目简介',
-            content: '# 项目简介\n\n内容',
-            rendered_at: new Date().toISOString(),
-            turn_count: 1,
-          },
-        }),
+    mockAsyncChat('Hello!', {
+      phase_document: {
+        phase: 'ICEBREAK',
+        title: '项目简介',
+        content: '# 项目简介\n\n内容',
+        rendered_at: new Date().toISOString(),
+        turn_count: 1,
+      },
     })
 
     render(<ChatPage />)
@@ -221,6 +271,50 @@ describe('ChatPage', () => {
     // Click the toggle button to hide the panel
     fireEvent.click(screen.getByLabelText('toggle phase document'))
     expect(screen.queryByLabelText('phase document panel')).not.toBeInTheDocument()
+  })
+
+  it('switches phase using the async polling approach', async () => {
+    const phaseReply = agentReply('欢迎进入需求收集阶段！', {
+      phase: 'REQUIREMENT',
+      phase_label: '需求收集',
+      progress: 0.2,
+    })
+
+    ;(global.fetch as jest.Mock)
+      // pre-fetch phase document call
+      .mockResolvedValueOnce({ ok: false })
+      // POST /switch-phase/async → task_id
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ task_id: MOCK_TASK_ID, status: 'pending' }),
+      })
+      // GET /tasks/{id} → completed
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          task_id: MOCK_TASK_ID,
+          status: 'completed',
+          result: phaseReply,
+          error: null,
+        }),
+      })
+
+    render(<ChatPage />)
+
+    const nextBtn = screen.getByRole('button', { name: '下一阶段' })
+    fireEvent.click(nextBtn)
+
+    await waitFor(() => {
+      const calls = (global.fetch as jest.Mock).mock.calls
+      const switchCall = calls.find((c: string[]) => c[0]?.includes('/switch-phase/async'))
+      expect(switchCall).toBeDefined()
+    })
+
+    await waitFor(() => {
+      const calls = (global.fetch as jest.Mock).mock.calls
+      const pollCall = calls.find((c: string[]) => c[0]?.includes(`/tasks/${MOCK_TASK_ID}`))
+      expect(pollCall).toBeDefined()
+    })
   })
 })
 

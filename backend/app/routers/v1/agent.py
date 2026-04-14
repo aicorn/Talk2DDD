@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio as _asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Annotated
@@ -16,6 +17,7 @@ from app.agent.agent_core import AgentCore
 from app.agent.context import PHASE_LABELS, PHASE_PROGRESS, Phase
 from app.agent.context_manager import ContextManager
 from app.agent.phase_document_renderer import PhaseDocumentRenderer
+from app.agent.task_store import get_task_store
 from app.core.dependencies import get_current_user
 from app.database.session import get_db
 from app.models.user import User
@@ -24,6 +26,7 @@ from app.schemas.agent import (
     AgentChatRequest,
     AgentChatResponse,
     AgentContextResponse,
+    AsyncChatStartResponse,
     ConversationListResponse,
     ConversationSummary,
     ExtractedConcept,
@@ -34,6 +37,7 @@ from app.schemas.agent import (
     SessionMessageItem,
     SessionMessagesResponse,
     SwitchPhaseRequest,
+    TaskStatusResponse,
 )
 
 import uuid as _uuid
@@ -73,7 +77,7 @@ def _friendly_ai_error(exc: Exception) -> str:
 
 async def _ensure_conversation(
     session_id: str,
-    user: User,
+    user_id: _uuid.UUID,
     project_id: str | None,
     db: AsyncSession,
 ) -> None:
@@ -101,7 +105,7 @@ async def _ensure_conversation(
                 pass
         convo = Conversation(
             id=conv_uuid,
-            user_id=user.id,
+            user_id=user_id,
             project_id=project_uuid,
             title="AI Agent 对话",
             status="active",
@@ -124,7 +128,7 @@ async def agent_chat(
 ) -> AgentChatResponse:
     """Process a user message through the AI Agent and return a structured response."""
     await _ensure_conversation(
-        request.session_id, current_user, request.project_id, db
+        request.session_id, current_user.id, request.project_id, db
     )
 
     try:
@@ -180,6 +184,231 @@ async def agent_chat(
 
 
 # ---------------------------------------------------------------------------
+# Async chat helpers
+# ---------------------------------------------------------------------------
+
+
+def _build_agent_response_dict(result) -> dict:  # type: ignore[type-arg]
+    """Serialise an AgentResponse dataclass to a plain dict.
+
+    The dict is stored in :class:`TaskStore` and later inflated back into an
+    :class:`AgentChatResponse` Pydantic model when the frontend polls for the
+    result.
+    """
+    phase_doc = None
+    if result.phase_document:
+        pd = result.phase_document
+        phase_doc = {
+            "phase": pd.phase,
+            "title": pd.title,
+            "content": pd.content,
+            "rendered_at": (
+                pd.rendered_at.isoformat()
+                if hasattr(pd.rendered_at, "isoformat")
+                else str(pd.rendered_at)
+            ),
+            "turn_count": pd.turn_count,
+        }
+    return {
+        "reply": result.reply,
+        "session_id": result.session_id,
+        "phase": result.phase,
+        "phase_label": result.phase_label,
+        "progress": result.progress,
+        "suggestions": result.suggestions or [],
+        "extracted_concepts": result.extracted_concepts or [],
+        "requirement_changes": result.requirement_changes or [],
+        "phase_document": phase_doc,
+        "tech_stack_preferences": result.tech_stack_preferences,
+        "phase_changed": result.phase_changed,
+    }
+
+
+async def _run_chat_task(
+    task_id: str,
+    request: AgentChatRequest,
+    user_id: _uuid.UUID,
+) -> None:
+    """Background coroutine: run agent chat and store result in the task store.
+
+    Opens its own database session (as recommended for background coroutines
+    that outlive the originating request scope).
+    """
+    from app.database.session import AsyncSessionLocal
+
+    task_store = get_task_store()
+    try:
+        async with AsyncSessionLocal() as db:
+            try:
+                await _ensure_conversation(
+                    request.session_id, user_id, request.project_id, db
+                )
+                result = await _agent_core.chat(
+                    session_id=request.session_id,
+                    message=request.message,
+                    db=db,
+                    project_id=request.project_id,
+                    provider=request.provider,
+                )
+                await db.commit()
+            except (openai.OpenAIError, ValueError, RuntimeError) as exc:
+                await db.rollback()
+                task_store.set_error(task_id, _friendly_ai_error(exc))
+                return
+            except Exception as exc:
+                await db.rollback()
+                logger.exception(
+                    "Unhandled error in async chat task %s: %s", task_id, exc
+                )
+                task_store.set_error(task_id, "服务器内部错误，请稍后重试")
+                return
+        task_store.set_result(task_id, _build_agent_response_dict(result))
+    except Exception as exc:
+        logger.exception(
+            "Unexpected error in _run_chat_task %s: %s", task_id, exc
+        )
+        task_store.set_error(task_id, "服务器内部错误，请稍后重试")
+
+
+async def _run_switch_phase_task(
+    task_id: str,
+    request: SwitchPhaseRequest,
+    user_id: _uuid.UUID,
+) -> None:
+    """Background coroutine: run switch_phase and store result in the task store.
+
+    Opens its own database session so it can outlive the originating request.
+    """
+    from app.database.session import AsyncSessionLocal
+
+    task_store = get_task_store()
+    try:
+        async with AsyncSessionLocal() as db:
+            try:
+                await _ensure_conversation(request.session_id, user_id, None, db)
+                result = await _agent_core.switch_phase(
+                    session_id=request.session_id,
+                    direction=request.direction,
+                    db=db,
+                    provider=request.provider,
+                )
+                await db.commit()
+            except ValueError as exc:
+                await db.rollback()
+                task_store.set_error(task_id, str(exc))
+                return
+            except (openai.OpenAIError, RuntimeError) as exc:
+                await db.rollback()
+                task_store.set_error(task_id, _friendly_ai_error(exc))
+                return
+            except Exception as exc:
+                await db.rollback()
+                logger.exception(
+                    "Unhandled error in async switch-phase task %s: %s", task_id, exc
+                )
+                task_store.set_error(task_id, "服务器内部错误，请稍后重试")
+                return
+        task_store.set_result(task_id, _build_agent_response_dict(result))
+    except Exception as exc:
+        logger.exception(
+            "Unexpected error in _run_switch_phase_task %s: %s", task_id, exc
+        )
+        task_store.set_error(task_id, "服务器内部错误，请稍后重试")
+
+
+# ---------------------------------------------------------------------------
+# POST /chat/async
+# ---------------------------------------------------------------------------
+
+
+@router.post("/chat/async", response_model=AsyncChatStartResponse, status_code=202)
+async def agent_chat_async(
+    request: AgentChatRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AsyncChatStartResponse:
+    """Submit a chat message for async processing.
+
+    Returns immediately with a ``task_id``.  The caller should poll
+    ``GET /tasks/{task_id}`` until ``status`` is ``"completed"`` or
+    ``"failed"``.
+    """
+    # Ensure the conversation row exists and is committed before the background
+    # task starts its own session, so it can see the row.
+    await _ensure_conversation(request.session_id, current_user.id, request.project_id, db)
+    await db.commit()
+
+    task_store = get_task_store()
+    task_id = task_store.create()
+    _asyncio.create_task(_run_chat_task(task_id, request, current_user.id))
+    return AsyncChatStartResponse(task_id=task_id)
+
+
+# ---------------------------------------------------------------------------
+# POST /switch-phase/async
+# ---------------------------------------------------------------------------
+
+
+@router.post("/switch-phase/async", response_model=AsyncChatStartResponse, status_code=202)
+async def switch_phase_async(
+    request: SwitchPhaseRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AsyncChatStartResponse:
+    """Submit a phase-switch request for async processing.
+
+    Returns immediately with a ``task_id``.  The caller should poll
+    ``GET /tasks/{task_id}`` until ``status`` is ``"completed"`` or
+    ``"failed"``.
+    """
+    await _ensure_conversation(request.session_id, current_user.id, None, db)
+    await db.commit()
+
+    task_store = get_task_store()
+    task_id = task_store.create()
+    _asyncio.create_task(_run_switch_phase_task(task_id, request, current_user.id))
+    return AsyncChatStartResponse(task_id=task_id)
+
+
+# ---------------------------------------------------------------------------
+# GET /tasks/{task_id}
+# ---------------------------------------------------------------------------
+
+
+@router.get("/tasks/{task_id}", response_model=TaskStatusResponse, status_code=200)
+async def get_task_status(
+    task_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> TaskStatusResponse:
+    """Poll for the result of an async chat task.
+
+    Returns ``{"status": "pending"}`` while processing is in progress,
+    ``{"status": "completed", "result": {...}}`` on success, or
+    ``{"status": "failed", "error": "..."}`` on failure.
+    """
+    task_store = get_task_store()
+    task_store.cleanup_expired()
+
+    record = task_store.get(task_id)
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Task not found or has expired",
+        )
+
+    result = None
+    if record.status == "completed" and record.result:
+        result = AgentChatResponse(**record.result)
+
+    return TaskStatusResponse(
+        task_id=task_id,
+        status=record.status,
+        result=result,
+        error=record.error,
+    )
+
+
+# ---------------------------------------------------------------------------
 # POST /switch-phase
 # ---------------------------------------------------------------------------
 
@@ -197,7 +426,7 @@ async def switch_phase(
     ``"next"`` (advance) or ``"back"`` (retreat).  Returns HTTP 400 when the
     session is already at the first or last phase.
     """
-    await _ensure_conversation(request.session_id, current_user, None, db)
+    await _ensure_conversation(request.session_id, current_user.id, None, db)
 
     try:
         result = await _agent_core.switch_phase(
