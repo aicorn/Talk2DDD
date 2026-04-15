@@ -2158,3 +2158,396 @@ PhaseDocumentRenderer.render(ctx)  ← 阶段文档包含全部已对齐条目
 | M17 | **P2 双角色场景提取**：`build_scenario_extraction_prompt()` + `merge_scenarios_from_json()` + `_reconcile_scenarios()` + 加强版 P2 系统提示 | 🔴 高 |
 | M18 | **P2 提取准确性加固**：`_extract_scenarios()` XML 解析失败正则兜底 + `_reconcile_scenarios()` INFO/WARNING 日志 + 提取器 prompt 去除「禁止重复」限制 | 🔴 高 |
 | M19 | **全阶段提取准确性加固**：将 M18 策略推广至 P1（`_reconcile_project_info` 日志）和 P3（`_extract_concepts` XML fallback + `_reconcile_domain_concepts` 日志 + `build_domain_concept_reconcile_prompt` 强化） | 🔴 高 |
+| M20 | **阶段开场主动建议机制**：`PhaseOpeningSuggestionBuilder`、`UserIntentClassifier`、`SuggestionApplicator`、`AgentContext.opening_suggestions`、`PhaseDocumentEditor` 工具 + 各阶段模板（§21） | 🔴 高 |
+
+---
+
+## 21. 阶段开场主动建议机制（Phase-Opening Structured Suggestion）
+
+### 21.1 设计背景与目标
+
+在进入 P2–P5 阶段时，AI 目前仅展示上一阶段的结果文档或等待用户主动提问。这导致用户不知道"现在应该讨论什么"，对话效率低。
+
+**期望行为**：进入每个阶段时，AI 自动根据上一阶段文档生成一份**结构化建议**，呈现给用户，用户可以：
+- 对建议中的某一条目做出选择（接受某备选方案）
+- 要求 AI 提供更多建议
+- 要求对某条目进一步细化
+- 直接修改/补充内容
+
+**约束**：
+- 建议模板与**阶段绑定**，与具体项目解耦（模板结构不变，内容由上阶段数据填充）
+- 阶段文档就是建议的载体——用户的选择直接体现在阶段文档的 CRUD 中
+- 整个机制由工具驱动（结构化意图解析 + 结构化文档操作），而非由主对话 AI 自由发挥
+
+---
+
+### 21.2 各阶段开场建议模板
+
+#### P2 — 场景细化建议（ScenarioRefinementSuggestion）
+
+**触发时机**：进入 P2 后，针对已收集的每个业务场景，AI 展示该场景的待细化问题列表及备选方案。
+
+```
+🔍 各场景待细化点
+
+S001 - 编写并发布文章
+┌──┬──────────────────────────────┬────────────────────────────┐
+│序号│细化问题                      │备选方案                    │
+├──┼──────────────────────────────┼────────────────────────────┤
+│ 1 │定时发布支持设置具体日期和时间吗？│ 是 / 否                    │
+│ 2 │草稿自动保存的频率是多久？       │ 30秒 / 1分钟 / 手动保存    │
+│ 3 │文章摘要是手动填写还是自动生成？  │ 手动填写 / 自动截取正文前200字│
+│ 4 │发布时需要设置封面图片吗？       │ 必须 / 可选 / 无封面       │
+└──┴──────────────────────────────┴────────────────────────────┘
+```
+
+**模板字段（与项目解耦）**：
+
+```python
+class RefinementItem(BaseModel):
+    index: int                  # 序号
+    question: str               # 细化问题（由 AI 从场景描述生成）
+    options: List[str]          # 备选方案列表（["是", "否"] 或具体选项）
+    selected: Optional[str] = None   # 用户选择结果
+    note: Optional[str] = None       # 补充说明
+
+class ScenarioRefinementSuggestion(BaseModel):
+    scenario_id: str
+    scenario_name: str
+    items: List[RefinementItem]
+    status: SuggestionStatus = SuggestionStatus.PENDING
+```
+
+#### P3 — 领域概念分组建议（ConceptGroupingSuggestion）
+
+**触发时机**：进入 P3 时，基于 P2 收集的所有业务场景，AI 建议领域概念的分组方式（限界上下文划分）。
+
+```
+🏗 领域概念分组建议
+
+建议将领域概念划分为以下限界上下文：
+
+1. 内容管理上下文（ContentContext）
+   包含概念：文章、草稿、分类、标签、封面图片
+   划分依据：均属于内容生命周期管理
+   备选方案：
+     A. 合并到用户上下文（如内容较少）
+     B. 进一步拆分为 ArticleContext + MediaContext
+
+2. 用户与权限上下文（UserContext）
+   包含概念：博主、访客、评论者
+   ...
+```
+
+**模板字段**：
+
+```python
+class ContextSuggestionItem(BaseModel):
+    index: int
+    context_name: str           # 建议的限界上下文名称
+    concepts: List[str]         # 建议包含的概念列表
+    rationale: str              # 划分依据
+    alternatives: List[str]     # 备选分组方案描述列表
+    accepted: Optional[bool] = None
+    modifications: Optional[str] = None
+```
+
+#### P4 — 模型设计建议（ModelDesignSuggestion）
+
+**触发时机**：进入 P4 时，基于 P3 确认的限界上下文和领域概念，AI 建议聚合根/实体/值对象的划分。
+
+```
+📐 模型设计建议
+
+1. 内容管理上下文
+   聚合根建议：Article（文章）
+   实体：Draft、Category
+   值对象：Slug、PublishTime、CoverImage
+   备选方案：
+     A. 将 Draft 设为 Article 的值对象（如草稿不需要独立生命周期）
+     B. 将 Category 提升为独立聚合根（如分类有复杂变更规则）
+
+2. ...
+```
+
+**模板字段**：
+
+```python
+class ModelDesignItem(BaseModel):
+    index: int
+    context_name: str
+    aggregate_root: str
+    entities: List[str]
+    value_objects: List[str]
+    rationale: str
+    alternatives: List[str]
+    decision: Optional[str] = None
+```
+
+#### P5 — 审阅与修订建议（ReviewRefinementSuggestion）
+
+**触发时机**：进入 P5 时，AI 对生成的领域模型文档做一致性检查，列出潜在问题和建议的修订点。
+
+```
+🔍 模型审阅建议
+
+1. 一致性问题
+   [高] Article 聚合中的 CoverImage 在领域词汇表中未定义类型
+   建议：补充 CoverImage 为值对象，包含 url、alt 字段
+   选项：接受建议 / 标记为无需处理 / 自定义修订
+
+2. 边界问题
+   [中] UserContext 与 ContentContext 之间存在双向引用
+   建议：通过领域事件（ArticlePublished）解耦，避免跨上下文直接引用
+   ...
+```
+
+**模板字段**：
+
+```python
+class ReviewItem(BaseModel):
+    index: int
+    severity: Literal["高", "中", "低"]
+    issue_type: str             # 一致性问题 / 边界问题 / 命名问题 / 遗漏项
+    description: str
+    suggestion: str
+    options: List[str]          # ["接受建议", "标记为无需处理", "自定义修订"]
+    resolution: Optional[str] = None
+```
+
+---
+
+### 21.3 Context 数据结构扩展
+
+在 `AgentContext` 中新增 `phase_suggestion` 字段，存储当前阶段的开场建议状态：
+
+```python
+class SuggestionStatus(str, Enum):
+    PENDING   = "PENDING"    # 已生成，等待用户响应
+    PARTIAL   = "PARTIAL"    # 部分条目已处理
+    COMPLETED = "COMPLETED"  # 所有条目已处理或关闭
+
+class PhaseSuggestion(BaseModel):
+    phase: Phase
+    generated_at: datetime
+    status: SuggestionStatus = SuggestionStatus.PENDING
+    # 仅一个字段会有值，取决于当前阶段
+    scenario_refinements: List[ScenarioRefinementSuggestion] = Field(default_factory=list)
+    context_groupings: List[ContextSuggestionItem] = Field(default_factory=list)
+    model_designs: List[ModelDesignItem] = Field(default_factory=list)
+    review_items: List[ReviewItem] = Field(default_factory=list)
+
+class AgentContext(BaseModel):
+    # ... 现有字段 ...
+    phase_suggestion: Optional[PhaseSuggestion] = None
+```
+
+---
+
+### 21.4 意图分类工具（UserIntentClassifier）
+
+每轮对话中，在主对话 AI 回复前，通过一次独立的 AI 调用（Classifier Role）将用户消息分类为以下意图之一：
+
+```python
+class UserIntent(str, Enum):
+    MAKE_SELECTION     = "MAKE_SELECTION"      # 用户接受/选择了某个备选方案
+    REQUEST_MORE       = "REQUEST_MORE"        # 用户要求更多建议
+    REQUEST_REFINE     = "REQUEST_REFINE"      # 用户要求细化某条目
+    REJECT_SUGGESTION  = "REJECT_SUGGESTION"   # 用户拒绝整条建议
+    PROVIDE_FEEDBACK   = "PROVIDE_FEEDBACK"    # 用户提供了开放性反馈
+    OFF_TOPIC          = "OFF_TOPIC"           # 与建议无关的提问
+
+class IntentClassification(BaseModel):
+    intent: UserIntent
+    target_index: Optional[int] = None   # 涉及建议的哪个条目（序号）
+    selected_option: Optional[str] = None  # MAKE_SELECTION 时提取的选择
+    raw_feedback: Optional[str] = None    # PROVIDE_FEEDBACK 时的原文摘要
+```
+
+**分类器 Prompt 设计原则**：
+- 单独的轻量级 AI 调用（无历史消息，仅包含本轮 user_message + 当前建议模板内容）
+- 返回纯 JSON，不包含自然语言
+- 分类结果缓存在 `AgentContext` 中，供主对话 AI 和文档编辑工具共同使用
+
+---
+
+### 21.5 用户选择解析与文档操作工具（PhaseDocumentEditor）
+
+根据意图分类结果，`PhaseDocumentEditor` 工具对阶段文档执行 CRUD 操作：
+
+#### 操作映射表
+
+| 用户意图 | 文档操作 | 操作类型 |
+|---------|---------|---------|
+| `MAKE_SELECTION` (选择备选方案) | 将 `RefinementItem.selected` 设为用户选择，更新场景描述 | UPDATE |
+| `REQUEST_MORE` (更多建议) | 向 `PhaseSuggestion` 追加新生成的条目 | CREATE |
+| `REQUEST_REFINE` (细化) | 在指定条目下追加子问题列表 | CREATE/UPDATE |
+| `REJECT_SUGGESTION` (拒绝) | 将条目标记为 `DISMISSED`，记录拒绝原因 | UPDATE |
+| `PROVIDE_FEEDBACK` (开放反馈) | 将反馈映射为文档的补充说明或新字段 | UPDATE |
+
+#### 工具接口定义
+
+```python
+class PhaseDocumentEditor:
+    def apply_selection(
+        self,
+        ctx: AgentContext,
+        target_index: int,
+        selected_option: str,
+        note: Optional[str] = None,
+    ) -> bool:
+        """将用户选择写入建议条目，并同步更新 domain_knowledge。"""
+
+    def add_refinement_items(
+        self,
+        ctx: AgentContext,
+        target_index: int,
+        new_items: List[RefinementItem],
+    ) -> int:
+        """在指定场景/条目下追加新的细化问题，返回追加数量。"""
+
+    def request_more_suggestions(
+        self,
+        ctx: AgentContext,
+        context_hint: str,
+        provider: Optional[str] = None,
+    ) -> List[RefinementItem]:
+        """触发 AI 生成更多建议条目并追加到 PhaseSuggestion。"""
+
+    def dismiss_item(
+        self,
+        ctx: AgentContext,
+        target_index: int,
+        reason: Optional[str] = None,
+    ) -> bool:
+        """将建议条目标记为用户拒绝，不再展示。"""
+
+    def update_document_field(
+        self,
+        ctx: AgentContext,
+        field_path: str,
+        new_value: Any,
+    ) -> bool:
+        """通用字段更新，支持对 domain_knowledge 任意路径的修改。"""
+```
+
+---
+
+### 21.6 生成建议的 AI 调用（PhaseOpeningSuggestionBuilder）
+
+这是进入新阶段时 `AgentCore.switch_phase()` 中触发的第一个 AI 调用（在生成主对话回复之前）：
+
+```
+switch_phase(next_phase)
+    │
+    ▼
+[AI 调用] PhaseOpeningSuggestionBuilder     ← 新增
+    │  输入：上阶段文档内容 + 当前 ctx
+    │  输出：纯 JSON，符合对应阶段的建议模板
+    │
+    ▼
+PhaseDocumentEditor.init_suggestion(ctx, json)
+    │  解析 JSON → PhaseSuggestion 对象
+    │  写入 ctx.phase_suggestion
+    │
+    ▼
+[AI 调用] 主对话 AI（Conversational Role）
+    │  system prompt 中注入阶段切换指令 + 建议内容
+    │  → 以格式化方式向用户展示建议
+    │
+    ▼
+PhaseDocumentRenderer.render(ctx)  ← 阶段文档包含建议状态
+```
+
+**建议生成 Prompt 设计原则**：
+- 严格规定输出 JSON Schema（与 `PhaseSuggestion` 对齐）
+- 输入仅包含上阶段文档 + 本阶段任务说明，不含对话历史（避免干扰）
+- 每个建议条目的 `options` 字段必须包含 2–4 个备选方案，避免开放式回答
+- 非阻塞（non-fatal）：若 JSON 解析失败，主对话 AI 仍正常响应，但不带结构化建议
+
+---
+
+### 21.7 对话轮次中的意图处理流程
+
+```
+用户消息
+    │
+    ▼
+[AI 调用 A] UserIntentClassifier
+    │  输入：user_message + 当前 PhaseSuggestion JSON
+    │  输出：IntentClassification JSON
+    │
+    ├─ MAKE_SELECTION ──→ PhaseDocumentEditor.apply_selection()
+    ├─ REQUEST_MORE ────→ PhaseDocumentEditor.request_more_suggestions()
+    ├─ REQUEST_REFINE ──→ PhaseDocumentEditor.add_refinement_items()
+    ├─ REJECT_SUGGESTION→ PhaseDocumentEditor.dismiss_item()
+    └─ PROVIDE_FEEDBACK/OFF_TOPIC → 跳过（仅由主对话 AI 处理）
+    │
+    ▼
+[AI 调用 B] 主对话 AI（Conversational Role）
+    │  system prompt 注入：
+    │    - 当前阶段指令
+    │    - 已更新的 PhaseSuggestion（含用户的选择状态）
+    │    - IntentClassification 结果（供 AI 生成合适回复）
+    │  → 自然语言回复（确认选择 / 展示新建议 / 请求补充）
+    │
+    ▼
+[AI 调用 C] 提取器角色（现有 _reconcile_* 方法）
+    │  从对话中提取任何新增的结构化知识
+    │
+    ▼
+PhaseDocumentRenderer.render(ctx)
+    │  渲染包含建议选择状态的阶段文档
+```
+
+---
+
+### 21.8 建议状态在阶段文档中的展示
+
+`PhaseDocumentRenderer` 为各阶段的 `PhaseSuggestion` 渲染追加"建议状态"区块：
+
+**P2 文档示例（含建议状态）**：
+
+```markdown
+# 业务需求草稿
+...（原有场景列表）...
+
+## 场景细化进度
+
+### S001 - 编写并发布文章（4 项问题，已确认 2 / 4）
+
+| # | 细化问题 | 备选方案 | 用户选择 |
+|---|---------|---------|---------|
+| 1 | 定时发布支持设置具体日期和时间吗？ | 是 / 否 | ✅ 是 |
+| 2 | 草稿自动保存的频率是多久？ | 30秒/1分钟/手动 | ✅ 30秒 |
+| 3 | 文章摘要是手动填写还是自动生成？ | 手动/自动截取 | ⏳ 待确认 |
+| 4 | 发布时需要设置封面图片吗？ | 必须/可选/无封面 | ⏳ 待确认 |
+```
+
+---
+
+### 21.9 设计约束与边界
+
+| 约束 | 说明 |
+|------|------|
+| **模板与项目解耦** | 建议模板结构（字段、类型、渲染格式）固化在代码中，不随项目内容变化 |
+| **建议为阶段文档的一部分** | `PhaseSuggestion` 存储在 `AgentContext` 中，通过 `PhaseDocumentRenderer` 渲染到阶段文档，用户的选择即阶段文档的修改 |
+| **意图分类非阻塞** | 若 `UserIntentClassifier` 调用失败或返回 `OFF_TOPIC`，主对话 AI 正常响应，无副作用 |
+| **去重与幂等** | `apply_selection()` 对同一条目的重复选择执行覆盖（UPDATE），不追加 |
+| **阶段文档仍是唯一真相** | 建议的最终效果始终体现在 `AgentContext.domain_knowledge` 中，建议本身只是收集信息的界面 |
+| **P1 不触发此机制** | 破冰阶段信息来自零，无上阶段文档可供参考 |
+
+---
+
+### 21.10 新增组件一览
+
+| 组件 | 类型 | 职责 |
+|------|------|------|
+| `PhaseSuggestion` | Pydantic Model (context.py) | 存储当前阶段开场建议及每条目的用户选择状态 |
+| `RefinementItem` / `ContextSuggestionItem` / `ModelDesignItem` / `ReviewItem` | Pydantic Models | 各阶段建议条目的数据结构 |
+| `SuggestionStatus` / `UserIntent` / `IntentClassification` | Enums / Pydantic | 建议状态 + 意图分类结果 |
+| `PhaseOpeningSuggestionBuilder` | PromptBuilder 方法 | 生成建议的 AI prompt（每阶段一个方法） |
+| `UserIntentClassifier` | AgentCore 私有方法 | 调用分类 AI，返回 `IntentClassification` |
+| `PhaseDocumentEditor` | 新类 (agent/phase_document_editor.py) | 封装对 `PhaseSuggestion` 和 `domain_knowledge` 的 CRUD 操作 |
+| `AgentCore._generate_phase_opening_suggestion()` | AgentCore 私有方法 | 在 `switch_phase()` 中触发建议生成 |
+| `AgentCore._classify_and_apply_intent()` | AgentCore 私有方法 | 在 `chat()` 中触发意图分类并调用对应工具 |
