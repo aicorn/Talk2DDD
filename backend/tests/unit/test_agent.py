@@ -183,6 +183,42 @@ class TestKnowledgeExtractor:
         assert len(ctx.domain_knowledge.domain_concepts) == 1
         assert ctx.domain_knowledge.domain_concepts[0].confidence == 0.9
 
+    def test_extract_concept_xml_fallback_on_malformed_xml(self):
+        """When <concept> contains a bare & that breaks XML, regex fallback fires."""
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        # Unescaped & is invalid XML — ET.fromstring() raises ParseError
+        reply = '<concept type="ENTITY" name="订单" confidence="0.9">购买 & 支付行为</concept>'
+        extractor.extract(reply, ctx)
+        assert len(ctx.domain_knowledge.domain_concepts) == 1
+        c = ctx.domain_knowledge.domain_concepts[0]
+        assert c.name == "订单"
+        assert c.concept_type == ConceptType.ENTITY
+
+    def test_extract_concept_xml_fallback_preserves_description(self):
+        """Regex fallback preserves tag text as description."""
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        reply = '<concept type="SERVICE" name="支付服务" confidence="0.8">处理 & 验证支付</concept>'
+        extractor.extract(reply, ctx)
+        assert ctx.domain_knowledge.domain_concepts[0].description == "处理 & 验证支付"
+
+    def test_extract_concept_xml_fallback_deduplicates(self):
+        """Regex fallback still deduplicates by name."""
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        ctx.domain_knowledge.domain_concepts.append(
+            DomainConcept(
+                name="订单", concept_type=ConceptType.ENTITY,
+                description="旧描述", confidence=0.7
+            )
+        )
+        reply = '<concept type="ENTITY" name="订单" confidence="0.9">新描述 & 更新内容</concept>'
+        extractor.extract(reply, ctx)
+        assert len(ctx.domain_knowledge.domain_concepts) == 1
+        # Confidence bumped, description updated (non-empty new value)
+        assert ctx.domain_knowledge.domain_concepts[0].confidence == 0.9
+
     def test_extract_scenario(self):
         extractor = KnowledgeExtractor()
         ctx = make_context()
@@ -695,6 +731,32 @@ class TestPromptBuilder:
             ai_reply="用户是系统的使用者。",
         )
         assert "订单" in prompt
+
+    def test_build_domain_concept_reconcile_prompt_mentions_xml_fallback(self):
+        """Prompt explicitly instructs to include <concept>-tagged items as XML-parse fallback."""
+        builder = PromptBuilder()
+        ctx = make_context()
+        prompt = builder.build_domain_concept_reconcile_prompt(
+            ctx,
+            user_message="确认订单概念",
+            ai_reply='<concept type="ENTITY" name="订单" confidence="0.9">购买 & 支付</concept>',
+        )
+        assert "XML" in prompt or "concept" in prompt
+
+    def test_build_domain_concept_reconcile_prompt_does_not_prohibit_repeats(self):
+        """Existing concepts listed as reference only — no 'please don't repeat' restriction."""
+        builder = PromptBuilder()
+        ctx = make_context()
+        ctx.domain_knowledge.domain_concepts.append(
+            DomainConcept(name="订单", concept_type=ConceptType.ENTITY, description="购买请求")
+        )
+        prompt = builder.build_domain_concept_reconcile_prompt(
+            ctx,
+            user_message="确认订单概念",
+            ai_reply="好的，订单概念已确认。",
+        )
+        # Must NOT say "请勿重复" — the merge function handles dedup
+        assert "请勿重复" not in prompt
 
     def test_phase_switch_trigger_domain_explore_uses_special_instruction(self):
         builder = PromptBuilder()

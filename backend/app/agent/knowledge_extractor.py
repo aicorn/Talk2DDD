@@ -68,11 +68,30 @@ class KnowledgeExtractor:
         for raw in _extract_raw_tags(text, "concept"):
             elem = _safe_parse_xml(raw)
             if elem is None:
-                continue
-            name = (elem.get("name") or "").strip()
-            type_str = (elem.get("type") or "ENTITY").upper()
-            confidence_str = elem.get("confidence") or "0.8"
-            description = (elem.text or "").strip()
+                # XML parse failed — attempt regex fallback to salvage name/type/text
+                _log.debug(
+                    "XML parse failed for <concept> tag; trying regex fallback. "
+                    "raw (truncated): %.120s",
+                    raw,
+                )
+                name_m = re.search(r'name=["\']([^"\']+)["\']', raw, re.IGNORECASE)
+                if not name_m:
+                    continue
+                type_m = re.search(r'type=["\']([^"\']+)["\']', raw, re.IGNORECASE)
+                conf_m = re.search(r'confidence=["\']([^"\']+)["\']', raw, re.IGNORECASE)
+                text_m = re.search(
+                    r"<concept[^>]*>(.*?)</concept>", raw, re.DOTALL | re.IGNORECASE
+                )
+                name = name_m.group(1).strip()
+                type_str = type_m.group(1).strip().upper() if type_m else "ENTITY"
+                confidence_str = conf_m.group(1).strip() if conf_m else "0.8"
+                description = text_m.group(1).strip() if text_m else ""
+            else:
+                name = (elem.get("name") or "").strip()
+                type_str = (elem.get("type") or "ENTITY").upper()
+                confidence_str = elem.get("confidence") or "0.8"
+                description = (elem.text or "").strip()
+
             if not name:
                 continue
             try:
@@ -104,6 +123,12 @@ class KnowledgeExtractor:
                         description=description,
                         confidence=confidence,
                     )
+                )
+                _log.debug(
+                    "Extracted new concept: name=%s type=%s (session=%s)",
+                    name,
+                    concept_type.value,
+                    ctx.session_id,
                 )
 
     def _extract_scenarios(self, text: str, ctx: AgentContext) -> None:

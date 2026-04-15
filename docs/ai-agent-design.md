@@ -2037,22 +2037,31 @@ POST /api/v1/agent/switch-phase
 
 ---
 
-## 20. P2 双角色场景提取机制（Dual-Role Scenario Extraction）
+## 20. 全阶段双角色提取机制与提取准确性策略
 
 ### 20.1 问题背景
 
-在第二阶段（需求收集 P2）中，对话型 AI 有时会在回复正文中描述或讨论业务场景，但未能同步嵌入对应的 `<scenario>` XML 标记。这导致 `KnowledgeExtractor` 无法从回复中提取到这些场景，最终造成**对话中显示的业务项**与**阶段文档中记录的业务项**不一致。
+在需求收集（P2）、领域探索（P3）及破冰引入（P1）阶段，对话型 AI 有时会在回复正文中描述或确认业务知识（业务场景、领域概念、项目信息），但未能同步嵌入对应的 XML 标记。此外，即使 AI 嵌入了 XML 标记，标记内容若包含未转义的特殊字符（如 `&`、`<`、`>`），XML 解析器也会抛出 `ParseError` 并静默丢弃该条目。这两类原因都会造成**对话中确认的业务项未出现在右侧阶段文档**的问题。
 
-### 20.2 设计方案：双角色模式
+### 20.2 三层防御策略
 
-为解决上述问题，在 P2 阶段的每轮对话结束后，引入一个独立的**"场景提取器"角色**（Extractor Role）。两个角色各司其职：
+为彻底解决上述问题，每个阶段均采用**三层防御**：
 
-| 角色 | 职责 | AI 调用 | 输出格式 |
-|------|------|---------|----------|
-| **对话者（Conversational Role）** | 理解用户意图、推进需求收集对话、引导深挖边界场景 | 第 1 次 AI 调用（现有流程） | 自然语言回复 + 可选 `<scenario>` XML 标记 |
-| **提取器（Extractor Role）** | 从本轮对话片段中识别**所有**业务场景并结构化输出 | 第 2 次 AI 调用（新增） | 纯 JSON 数组 |
+| 层次 | 机制 | 说明 |
+|------|------|------|
+| **Layer 1** | XML 解析（原有） | `KnowledgeExtractor.extract()` 尝试 `ET.fromstring()` 解析 XML 标记 |
+| **Layer 2** | XML 解析失败正则兜底（新增） | `ParseError` 时降级为正则表达式直接提取属性和文本内容，防止静默丢失 |
+| **Layer 3** | 提取器角色 JSON 兜底（原有+加强） | 每轮对话后独立的第 2 次 AI 调用，明确要求包含 XML 标签内的条目，系统层面去重 |
 
-### 20.3 时序流程
+### 20.3 各阶段应用
+
+| 阶段 | 提取目标 | 对话者 (Layer 1+2) | 提取器 (Layer 3) | 日志等级 |
+|------|----------|-------------------|-----------------|----------|
+| P1 破冰引入 | project_name, domain_description | `_extract_project_info()` — 正则属性提取，天然鲁棒无需 XML fallback | `_reconcile_project_info()` | INFO（字段更新）/ WARNING（无更新） |
+| P2 需求收集 | business_scenarios | `_extract_scenarios()` — XML + fallback | `_reconcile_scenarios()` | INFO（新增数>0）/ WARNING（0 新增） |
+| P3 领域探索 | domain_concepts | `_extract_concepts()` — XML + fallback | `_reconcile_domain_concepts()` | INFO（新增数>0）/ WARNING（0 新增） |
+
+### 20.4 时序流程（以 P2 为例，P3 同理）
 
 ```
 用户消息
@@ -2060,61 +2069,41 @@ POST /api/v1/agent/switch-phase
     ▼
 [第 1 次 AI 调用] 对话者角色
     │  system prompt = PromptBuilder.build()（含完整阶段指令）
-    │  → 自然语言回复 + 可选 <scenario> 标记
+    │  → 自然语言回复 + 可选 <scenario>/<concept> XML 标记
     │
     ▼
-KnowledgeExtractor.extract(ai_reply, ctx)   ← XML 标记提取（原有）
+KnowledgeExtractor.extract(ai_reply, ctx)   ← Layer 1+2
+    │  _extract_scenarios()/_extract_concepts()
+    │    ├─ ET.fromstring() 成功 → 正常解析
+    │    └─ ParseError → 正则兜底 + DEBUG 日志
     │
     ▼
-[第 2 次 AI 调用] 提取器角色（仅 P2 阶段）
-    │  user prompt = PromptBuilder.build_scenario_extraction_prompt()
-    │    ┌─ 本轮 user_message
-    │    ├─ 本轮 ai_reply
-    │    └─ ctx 中现有 business_scenarios（避免重复）
+[第 2 次 AI 调用] 提取器角色                ← Layer 3
+    │  user prompt = build_scenario_extraction_prompt() /
+    │                build_domain_concept_reconcile_prompt()
+    │    ├─ 显式要求包含 <scenario>/<concept> XML 标签中的条目
+    │    ├─ 现有条目"仅供参考"（不再禁止重复）
+    │    └─ 去重由 merge_*_from_json() 负责
     │  → 纯 JSON 数组
     │
     ▼
-KnowledgeExtractor.merge_scenarios_from_json(json_reply, ctx)
-    │  • 已存在同名场景 → 补充空描述（不覆盖）
-    │  • 新场景 → 追加到 ctx.domain_knowledge.business_scenarios
+KnowledgeExtractor.merge_*_from_json(json_reply, ctx)
+    │  • 已存在同名条目 → 补充/更新（不覆盖已有值）
+    │  • 新条目 → 追加
     │
     ▼
-PhaseDocumentRenderer.render(ctx)  ← 阶段文档包含全部已对齐场景
+AgentCore._reconcile_*()  ← 结果日志
+    │  • added > 0 → INFO（含数量、session、轮次、总计）
+    │  └─ added == 0 → WARNING（提示可能遗漏）
+    │
+    ▼
+PhaseDocumentRenderer.render(ctx)  ← 阶段文档包含全部已对齐条目
 ```
-
-### 20.4 实现细节
-
-#### PromptBuilder.build_scenario_extraction_prompt()
-- 输入：`ctx`（含现有场景列表）、`user_message`、`ai_reply`
-- 输出：单条 `user` 角色消息字符串，指令简洁，要求只返回 JSON 数组
-- 现有场景以 JSON 格式列出（仅供参考，系统自动去重），不限制提取器重新包含已有场景
-- **明确要求提取器包含 `<scenario>` XML 标签中的场景**，作为 XML 解析失败的兜底保障
-- 系统层面的去重由 `merge_scenarios_from_json()` 完成，无需 AI 层面去重
-
-#### KnowledgeExtractor._extract_scenarios()
-- 首先通过 `_safe_parse_xml()` 解析 XML 标签
-- **若 XML 解析失败（ParseError），自动降级为正则表达式兜底提取**：用正则从原始标签字符串中提取 `id`、`name` 属性和标签文本内容
-- 每次 XML 解析失败时记录 DEBUG 日志（含原始字符串前 120 字符），便于排查 AI 输出格式问题
-- 每次新增场景时记录 DEBUG 日志（包含 id、name、session_id）
-
-#### KnowledgeExtractor.merge_scenarios_from_json()
-- 容错地从文本中提取第一个 JSON 数组（支持 AI 偶尔夹杂无关文字的情况）
-- 按场景 name 去重：同名场景仅补充空描述，不覆盖已有数据
-- 解决 id 冲突：新场景若与现有 id 重复，自动分配新 id
-- 返回新增场景数量（用于日志和测试断言）
-
-#### AgentCore._reconcile_scenarios()
-- 在 `chat()` 方法步骤 5（XML 提取）之后、步骤 7（文档渲染）之前调用
-- 仅在 `ctx.current_phase == Phase.REQUIREMENT` 时触发
-- **记录结果日志**：
-  - 新增场景数 > 0 时：记录 INFO 日志（包含新增数量、session_id、轮次、总场景数）
-  - 新增场景数 == 0 时：记录 WARNING 日志，提醒可能有场景在对话中被确认但未被捕获
-  - 发生异常时：记录 DEBUG 日志，不影响主流程响应
 
 ### 20.5 XML 解析失败时的降级策略
 
 ```
-<scenario id="S003" name="后台内容管理">...</scenario>
+<scenario id="S003" name="后台内容管理">查看列表 & 编辑更新</scenario>
            │
            ▼
     _safe_parse_xml()
@@ -2123,26 +2112,49 @@ PhaseDocumentRenderer.render(ctx)  ← 阶段文档包含全部已对齐场景
     │ ParseError  │  成功
     ▼             ▼
 正则兜底提取    使用 ET.Element
-  id_m = re.search('id=...', raw)
-  name_m = re.search('name=...', raw)
-  text_m = re.search('<scenario...>(.*?)</scenario>', raw)
+  id_m / name_m / text_m
+  + DEBUG 日志（raw 前 120 字符）
            │
            ▼
   合并到 ctx（与正常路径相同的去重逻辑）
 ```
 
-**触发场景**：AI 在 `<scenario>` 标签内容中包含未转义的特殊 XML 字符（如 `&`、`<`、`>`），导致 `ET.fromstring()` 抛出 `ParseError`。正则兜底提取可恢复 `name` 和 `description`，保证场景不丢失。
+**同样适用于 `<concept>` 标签**：提取 `name`、`type`、`confidence` 属性和标签文本作为 `description`。
 
-### 20.6 性能考量
+### 20.6 各方法实现细节
 
-第 2 次 AI 调用使用专注的短 prompt（无完整系统提示、无历史消息），推理 token 消耗远低于主对话调用。可以通过以下策略进一步优化：
+#### KnowledgeExtractor._extract_scenarios() / _extract_concepts()
+- 先 `ET.fromstring()` 解析；`ParseError` → 正则兜底（`id/name/type/confidence` 属性 + 标签文本）
+- ParseError 时记录 DEBUG 日志（含 raw 截断前 120 字符）
+- 新增条目时记录 DEBUG 日志（含 id/name 和 session_id）
 
-- **条件触发**：若第 1 次 AI 回复已包含 `<scenario>` 标记且数量与对话内容一致，可跳过第 2 次调用（未来优化项）。
+#### PromptBuilder.build_scenario_extraction_prompt() / build_domain_concept_reconcile_prompt()
+- 现有条目以 JSON 列出，标注"仅供参考"（不再说"请勿重复"）
+- 新增明确指令：**如果 AI 回复包含 XML 标签，务必将其中条目包含在 JSON 返回中**（XML 解析可能失败，本提取器是兜底保障）
+- 去重交由 `merge_*_from_json()` 处理
+
+#### KnowledgeExtractor.merge_scenarios_from_json() / merge_concepts_from_json()
+- 容错提取第一个 JSON 数组（支持 AI 夹杂无关文字）
+- 按 name 去重；id 冲突自动分配新 id
+- 返回新增数量（用于日志和测试断言）
+
+#### AgentCore._reconcile_project_info() / _reconcile_scenarios() / _reconcile_domain_concepts()
+- 结果日志：
+  - P1：INFO（字段更新）/ WARNING（无更新，可能遗漏项目信息）
+  - P2/P3：INFO（新增 N 条，含数量/session/轮次/总计）/ WARNING（0 新增，可能遗漏）
+- 任何异常：DEBUG 日志，不影响主流程
+
+### 20.7 性能考量
+
+每次提取器角色调用使用专注的短 prompt（无完整系统提示、无历史消息），推理 token 消耗远低于主对话调用。可以通过以下策略进一步优化：
+
+- **条件触发**：若第 1 次 AI 回复已包含 XML 标记且数量与对话内容一致，可跳过第 2 次调用（未来优化项）。
 - **低优先级模型**：提取器调用可配置为使用响应更快、成本更低的 AI 模型（未来优化项）。
 
-### 20.7 §15 补充：实现路线图新增里程碑
+### 20.8 §15 补充：实现路线图新增里程碑
 
 | 里程碑 | 内容 | 优先级 |
 |--------|------|--------|
 | M17 | **P2 双角色场景提取**：`build_scenario_extraction_prompt()` + `merge_scenarios_from_json()` + `_reconcile_scenarios()` + 加强版 P2 系统提示 | 🔴 高 |
-| M18 | **提取准确性加固**：`_extract_scenarios()` XML 解析失败正则兜底 + `_reconcile_scenarios()` INFO/WARNING 日志 + 提取器 prompt 去除「禁止重复」限制 | 🔴 高 |
+| M18 | **P2 提取准确性加固**：`_extract_scenarios()` XML 解析失败正则兜底 + `_reconcile_scenarios()` INFO/WARNING 日志 + 提取器 prompt 去除「禁止重复」限制 | 🔴 高 |
+| M19 | **全阶段提取准确性加固**：将 M18 策略推广至 P1（`_reconcile_project_info` 日志）和 P3（`_extract_concepts` XML fallback + `_reconcile_domain_concepts` 日志 + `build_domain_concept_reconcile_prompt` 强化） | 🔴 高 |

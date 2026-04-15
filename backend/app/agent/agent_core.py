@@ -380,6 +380,8 @@ class AgentCore:
         """
         import logging as _logging
 
+        _log = _logging.getLogger(__name__)
+
         # Skip if both fields are already populated — nothing more to extract.
         if (
             ctx.domain_knowledge.project_name
@@ -393,9 +395,28 @@ class AgentCore:
             )
             messages = [{"role": "user", "content": reconcile_prompt}]
             json_reply = await chat_completion(messages=messages, provider=provider)
-            self._knowledge_extractor.merge_project_info_from_json(json_reply, ctx)
+            updated = self._knowledge_extractor.merge_project_info_from_json(
+                json_reply, ctx
+            )
+            if updated:
+                _log.info(
+                    "Project info reconciler updated context for session %s "
+                    "(turn %d): project_name=%r domain_description=%r",
+                    ctx.session_id,
+                    ctx.turn_count,
+                    ctx.domain_knowledge.project_name,
+                    ctx.domain_knowledge.domain_description,
+                )
+            else:
+                _log.warning(
+                    "Project info reconciler ran but extracted nothing for "
+                    "session %s (turn %d). Check if project name or domain "
+                    "background was mentioned but not captured.",
+                    ctx.session_id,
+                    ctx.turn_count,
+                )
         except Exception:
-            _logging.getLogger(__name__).debug(
+            _log.debug(
                 "Project info reconciliation failed for session %s (non-fatal)",
                 ctx.session_id,
                 exc_info=True,
@@ -514,15 +535,39 @@ class AgentCore:
         """
         import logging as _logging
 
+        _log = _logging.getLogger(__name__)
+        count_before = len(ctx.domain_knowledge.domain_concepts)
+
         try:
             reconcile_prompt = self._prompt_builder.build_domain_concept_reconcile_prompt(
                 ctx, user_message, ai_reply
             )
             messages = [{"role": "user", "content": reconcile_prompt}]
             json_reply = await chat_completion(messages=messages, provider=provider)
-            self._knowledge_extractor.merge_concepts_from_json(json_reply, ctx)
+            added = int(
+                self._knowledge_extractor.merge_concepts_from_json(json_reply, ctx)
+                or 0
+            )
+            if added > 0:
+                _log.info(
+                    "Concept reconciler added %d new concept(s) for session %s "
+                    "(turn %d, total=%d)",
+                    added,
+                    ctx.session_id,
+                    ctx.turn_count,
+                    len(ctx.domain_knowledge.domain_concepts),
+                )
+            else:
+                _log.warning(
+                    "Concept reconciler ran but added 0 new concepts for session %s "
+                    "(turn %d, existing=%d). Check if a concept was confirmed in the "
+                    "conversation but not captured.",
+                    ctx.session_id,
+                    ctx.turn_count,
+                    count_before,
+                )
         except Exception:
-            _logging.getLogger(__name__).debug(
+            _log.debug(
                 "Domain concept reconciliation failed for session %s (non-fatal)",
                 ctx.session_id,
                 exc_info=True,

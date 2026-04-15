@@ -335,7 +335,7 @@ class PromptBuilder:
                 for c in existing
             )
             existing_block = (
-                f"已有领域概念（请勿重复，但可补充描述）：\n[\n{existing_lines}\n]"
+                f"已有领域概念（仅供参考，系统会自动去重）：\n[\n{existing_lines}\n]"
             )
         else:
             existing_block = "已有领域概念：[]（尚无）"
@@ -343,12 +343,15 @@ class PromptBuilder:
         return (
             "你是领域概念提取助手，负责从对话片段中识别并结构化领域概念。\n\n"
             f"{existing_block}\n\n"
-            "请从下面这轮对话中提取**所有**提到或讨论过的领域概念（包括已有概念的补充信息），"
+            "请从下面这轮对话中提取**所有**提到、讨论过或确认过的领域概念，"
             "以 JSON 数组格式返回。每个元素包含：\n"
             '  - "name"：概念名称\n'
             '  - "type"：ENTITY/VALUE_OBJECT/SERVICE/EVENT/AGGREGATE/REPOSITORY/DOMAIN_SERVICE\n'
             '  - "description"：1~2 句描述\n'
             '  - "confidence"：置信度 0.0~1.0\n\n'
+            "**重要**：如果 AI 回复中包含 `<concept>` XML 标签，请务必将其中的概念也包含在"
+            "返回结果中——XML 解析可能因格式问题失败，本提取器是兜底保障。\n"
+            "系统会自动对已有概念去重，无需担心重复。\n"
             "如果本轮对话未涉及任何领域概念，返回空数组 []。\n"
             "只返回 JSON 数组，不要任何其他文字或 Markdown 标记。\n\n"
             "---\n"
