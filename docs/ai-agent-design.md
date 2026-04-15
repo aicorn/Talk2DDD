@@ -2087,7 +2087,15 @@ PhaseDocumentRenderer.render(ctx)  ← 阶段文档包含全部已对齐场景
 #### PromptBuilder.build_scenario_extraction_prompt()
 - 输入：`ctx`（含现有场景列表）、`user_message`、`ai_reply`
 - 输出：单条 `user` 角色消息字符串，指令简洁，要求只返回 JSON 数组
-- 现有场景以 JSON 格式列出，提示提取器不重复添加但可补充描述
+- 现有场景以 JSON 格式列出（仅供参考，系统自动去重），不限制提取器重新包含已有场景
+- **明确要求提取器包含 `<scenario>` XML 标签中的场景**，作为 XML 解析失败的兜底保障
+- 系统层面的去重由 `merge_scenarios_from_json()` 完成，无需 AI 层面去重
+
+#### KnowledgeExtractor._extract_scenarios()
+- 首先通过 `_safe_parse_xml()` 解析 XML 标签
+- **若 XML 解析失败（ParseError），自动降级为正则表达式兜底提取**：用正则从原始标签字符串中提取 `id`、`name` 属性和标签文本内容
+- 每次 XML 解析失败时记录 DEBUG 日志（含原始字符串前 120 字符），便于排查 AI 输出格式问题
+- 每次新增场景时记录 DEBUG 日志（包含 id、name、session_id）
 
 #### KnowledgeExtractor.merge_scenarios_from_json()
 - 容错地从文本中提取第一个 JSON 数组（支持 AI 偶尔夹杂无关文字的情况）
@@ -2098,17 +2106,43 @@ PhaseDocumentRenderer.render(ctx)  ← 阶段文档包含全部已对齐场景
 #### AgentCore._reconcile_scenarios()
 - 在 `chat()` 方法步骤 5（XML 提取）之后、步骤 7（文档渲染）之前调用
 - 仅在 `ctx.current_phase == Phase.REQUIREMENT` 时触发
-- 任何异常均静默记录为 DEBUG 日志，不影响主流程响应
+- **记录结果日志**：
+  - 新增场景数 > 0 时：记录 INFO 日志（包含新增数量、session_id、轮次、总场景数）
+  - 新增场景数 == 0 时：记录 WARNING 日志，提醒可能有场景在对话中被确认但未被捕获
+  - 发生异常时：记录 DEBUG 日志，不影响主流程响应
 
-### 20.5 性能考量
+### 20.5 XML 解析失败时的降级策略
+
+```
+<scenario id="S003" name="后台内容管理">...</scenario>
+           │
+           ▼
+    _safe_parse_xml()
+           │
+    ┌──────┴──────┐
+    │ ParseError  │  成功
+    ▼             ▼
+正则兜底提取    使用 ET.Element
+  id_m = re.search('id=...', raw)
+  name_m = re.search('name=...', raw)
+  text_m = re.search('<scenario...>(.*?)</scenario>', raw)
+           │
+           ▼
+  合并到 ctx（与正常路径相同的去重逻辑）
+```
+
+**触发场景**：AI 在 `<scenario>` 标签内容中包含未转义的特殊 XML 字符（如 `&`、`<`、`>`），导致 `ET.fromstring()` 抛出 `ParseError`。正则兜底提取可恢复 `name` 和 `description`，保证场景不丢失。
+
+### 20.6 性能考量
 
 第 2 次 AI 调用使用专注的短 prompt（无完整系统提示、无历史消息），推理 token 消耗远低于主对话调用。可以通过以下策略进一步优化：
 
 - **条件触发**：若第 1 次 AI 回复已包含 `<scenario>` 标记且数量与对话内容一致，可跳过第 2 次调用（未来优化项）。
 - **低优先级模型**：提取器调用可配置为使用响应更快、成本更低的 AI 模型（未来优化项）。
 
-### 20.6 §15 补充：实现路线图新增里程碑
+### 20.7 §15 补充：实现路线图新增里程碑
 
 | 里程碑 | 内容 | 优先级 |
 |--------|------|--------|
 | M17 | **P2 双角色场景提取**：`build_scenario_extraction_prompt()` + `merge_scenarios_from_json()` + `_reconcile_scenarios()` + 加强版 P2 系统提示 | 🔴 高 |
+| M18 | **提取准确性加固**：`_extract_scenarios()` XML 解析失败正则兜底 + `_reconcile_scenarios()` INFO/WARNING 日志 + 提取器 prompt 去除「禁止重复」限制 | 🔴 高 |

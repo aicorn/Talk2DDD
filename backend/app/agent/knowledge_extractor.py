@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import List, Optional
 from xml.etree import ElementTree as ET
@@ -18,6 +19,8 @@ from app.agent.context import (
     TechChoice,
     TechProficiency,
 )
+
+_log = logging.getLogger(__name__)
 
 
 def _extract_raw_tags(text: str, tag: str) -> List[str]:
@@ -107,10 +110,29 @@ class KnowledgeExtractor:
         for raw in _extract_raw_tags(text, "scenario"):
             elem = _safe_parse_xml(raw)
             if elem is None:
-                continue
-            scenario_id = (elem.get("id") or "").strip()
-            name = (elem.get("name") or "").strip()
-            description = (elem.text or "").strip()
+                # XML parse failed — attempt regex fallback to salvage id/name/text
+                _log.debug(
+                    "XML parse failed for <scenario> tag; trying regex fallback. "
+                    "raw (truncated): %.120s",
+                    raw,
+                )
+                # id is optional — use `*` so an empty id="" still matches and
+                # falls through to the auto-generation logic below.
+                id_m = re.search(r'id=["\']([^"\']*)["\']', raw, re.IGNORECASE)
+                name_m = re.search(r'name=["\']([^"\']+)["\']', raw, re.IGNORECASE)
+                if not name_m:
+                    continue
+                text_m = re.search(
+                    r"<scenario[^>]*>(.*?)</scenario>", raw, re.DOTALL | re.IGNORECASE
+                )
+                scenario_id = id_m.group(1).strip() if id_m else ""
+                name = name_m.group(1).strip()
+                description = text_m.group(1).strip() if text_m else ""
+            else:
+                scenario_id = (elem.get("id") or "").strip()
+                name = (elem.get("name") or "").strip()
+                description = (elem.text or "").strip()
+
             if not name:
                 continue
 
@@ -137,6 +159,12 @@ class KnowledgeExtractor:
                         name=name,
                         description=description,
                     )
+                )
+                _log.debug(
+                    "Extracted new scenario via XML: id=%s name=%s (session=%s)",
+                    auto_id,
+                    name,
+                    ctx.session_id,
                 )
 
     def _extract_clarifications(self, text: str, ctx: AgentContext) -> None:

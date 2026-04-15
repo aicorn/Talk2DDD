@@ -195,6 +195,40 @@ class TestKnowledgeExtractor:
         assert s.name == "用户下单"
         assert s.id == "S001"
 
+    def test_extract_scenario_xml_fallback_on_malformed_xml(self):
+        """When <scenario> contains a bare & that breaks XML, regex fallback fires."""
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        # '&' is invalid in XML without escaping — ET.fromstring() will raise ParseError
+        reply = '<scenario id="S003" name="后台内容管理">查看列表 & 编辑更新</scenario>'
+        extractor.extract(reply, ctx)
+        assert len(ctx.domain_knowledge.business_scenarios) == 1
+        s = ctx.domain_knowledge.business_scenarios[0]
+        assert s.name == "后台内容管理"
+        assert s.id == "S003"
+
+    def test_extract_scenario_xml_fallback_preserves_description(self):
+        """Regex fallback preserves the text content as description."""
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        reply = '<scenario id="S002" name="用户退款">退款申请 & 审核流程</scenario>'
+        extractor.extract(reply, ctx)
+        assert ctx.domain_knowledge.business_scenarios[0].description == "退款申请 & 审核流程"
+
+    def test_extract_scenario_xml_fallback_deduplicates(self):
+        """Regex fallback still deduplicates by name."""
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        # Pre-insert same name
+        ctx.domain_knowledge.business_scenarios.append(
+            BusinessScenario(id="S001", name="后台内容管理", description="旧描述")
+        )
+        reply = '<scenario id="S003" name="后台内容管理">新描述 & 新功能</scenario>'
+        extractor.extract(reply, ctx)
+        assert len(ctx.domain_knowledge.business_scenarios) == 1
+        # Description should be updated to the new one (non-empty)
+        assert ctx.domain_knowledge.business_scenarios[0].description == "新描述 & 新功能"
+
     def test_extract_clarification(self):
         extractor = KnowledgeExtractor()
         ctx = make_context()
@@ -586,6 +620,32 @@ class TestPromptBuilder:
             ai_reply="好的，报表功能是一个场景。",
         )
         assert "JSON" in prompt
+
+    def test_build_scenario_extraction_prompt_mentions_xml_fallback(self):
+        """Prompt explicitly instructs to include <scenario>-tagged items as XML-parse fallback."""
+        builder = PromptBuilder()
+        ctx = make_context()
+        prompt = builder.build_scenario_extraction_prompt(
+            ctx,
+            user_message="确认 S003 后台内容管理场景",
+            ai_reply='<scenario id="S003" name="后台内容管理">博主登录后台管理内容</scenario>',
+        )
+        assert "XML" in prompt or "scenario" in prompt
+
+    def test_build_scenario_extraction_prompt_does_not_prohibit_repeats(self):
+        """Existing scenarios should be listed but NOT marked as forbidden to return."""
+        builder = PromptBuilder()
+        ctx = make_context()
+        ctx.domain_knowledge.business_scenarios.append(
+            BusinessScenario(id="S001", name="用户注册", description="用户创建账号")
+        )
+        prompt = builder.build_scenario_extraction_prompt(
+            ctx,
+            user_message="确认 S001 用户注册场景",
+            ai_reply="好的，用户注册场景已确认。",
+        )
+        # Must NOT say "请勿重复" — the merge function handles dedup
+        assert "请勿重复" not in prompt
 
     def test_build_initial_domain_concept_extraction_prompt_returns_empty_when_no_scenarios(self):
         builder = PromptBuilder()

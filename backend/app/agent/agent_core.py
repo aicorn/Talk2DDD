@@ -422,15 +422,39 @@ class AgentCore:
         """
         import logging as _logging
 
+        _log = _logging.getLogger(__name__)
+        count_before = len(ctx.domain_knowledge.business_scenarios)
+
         try:
             extraction_prompt = self._prompt_builder.build_scenario_extraction_prompt(
                 ctx, user_message, ai_reply
             )
             messages = [{"role": "user", "content": extraction_prompt}]
             json_reply = await chat_completion(messages=messages, provider=provider)
-            self._knowledge_extractor.merge_scenarios_from_json(json_reply, ctx)
+            added = int(
+                self._knowledge_extractor.merge_scenarios_from_json(json_reply, ctx)
+                or 0
+            )
+            if added > 0:
+                _log.info(
+                    "Scenario reconciler added %d new scenario(s) for session %s "
+                    "(turn %d, total=%d)",
+                    added,
+                    ctx.session_id,
+                    ctx.turn_count,
+                    len(ctx.domain_knowledge.business_scenarios),
+                )
+            else:
+                _log.warning(
+                    "Scenario reconciler ran but added 0 new scenarios for session %s "
+                    "(turn %d, existing=%d). Check if a scenario was confirmed in the "
+                    "conversation but not captured.",
+                    ctx.session_id,
+                    ctx.turn_count,
+                    count_before,
+                )
         except Exception:
-            _logging.getLogger(__name__).debug(
+            _log.debug(
                 "Scenario reconciliation failed for session %s (non-fatal)",
                 ctx.session_id,
                 exc_info=True,
