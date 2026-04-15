@@ -14,11 +14,14 @@ from app.agent.context import (
     Phase,
     PHASE_LABELS,
     PHASE_PROGRESS,
+    PhaseSuggestion,
     TechStackPreferences,
+    UserIntent,
 )
 from app.agent.context_manager import ContextManager
 from app.agent.knowledge_extractor import KnowledgeExtractor
 from app.agent.memory_manager import MemoryManager
+from app.agent.phase_document_editor import OutOfScopeHandler, PhaseDocumentEditor
 from app.agent.phase_document_renderer import PhaseDocumentRenderer
 from app.agent.phase_engine import PhaseEngine
 from app.agent.prompt_builder import PromptBuilder
@@ -120,6 +123,8 @@ class AgentCore:
         self._prompt_builder = PromptBuilder()
         self._knowledge_extractor = KnowledgeExtractor()
         self._doc_renderer = PhaseDocumentRenderer()
+        self._phase_doc_editor = PhaseDocumentEditor()
+        self._out_of_scope_handler = OutOfScopeHandler()
 
     async def chat(
         self,
@@ -144,6 +149,40 @@ class AgentCore:
         # 3. Build system prompt (with optional rolling summary – Layer 2)
         summary_block = self._memory_manager.get_summary_block(ctx)
         system_prompt = self._prompt_builder.build(ctx, memory_summary_block=summary_block)
+
+        # 3b. If a phase-opening suggestion is active (P2–P5), classify the
+        #     user's intent and apply any document operations.  The results
+        #     may augment the system prompt with an OUT_OF_SCOPE reminder or
+        #     a structured reply format instruction.
+        applied_changes_text = ""
+        if ctx.phase_suggestion is not None and ctx.current_phase != Phase.ICEBREAK:
+            applied_changes_text, out_of_scope_reminder = (
+                await self._classify_and_apply_intent(ctx, message, provider)
+            )
+            if out_of_scope_reminder:
+                system_prompt = system_prompt + "\n\n---\n\n" + out_of_scope_reminder
+            elif applied_changes_text:
+                # Build pending items text from suggestion
+                pending_lines: List[str] = []
+                suggestion = ctx.phase_suggestion
+                if suggestion is not None:
+                    for sr in suggestion.scenario_refinements:
+                        for item in sr.items:
+                            if item.selected is None and not item.dismissed:
+                                opts = " / ".join(item.options)
+                                pending_lines.append(
+                                    f"[{item.index}] {item.question}　备选：{opts}"
+                                )
+                pending_items_text = "\n".join(pending_lines)
+                structured_instruction = (
+                    self._prompt_builder.build_structured_reply_instruction(
+                        ctx,
+                        applied_changes=applied_changes_text.splitlines(),
+                        pending_items_text=pending_items_text,
+                    )
+                )
+                if structured_instruction:
+                    system_prompt = system_prompt + "\n\n---\n\n" + structured_instruction
 
         # 4. Call AI – pass Layer-1 immediate history + current message
         history = await self._memory_manager.get_messages_for_ai(ctx, db)
@@ -280,6 +319,12 @@ class AgentCore:
             memory_summary_block=summary_block,
             phase_switch_trigger=True,
         )
+
+        # 4b. Generate phase-opening structured suggestion (non-fatal).
+        #     Stored in ctx.phase_suggestion before the main AI call so the
+        #     system prompt's context block can reference it if needed.
+        if ctx.current_phase != Phase.ICEBREAK and direction == "next":
+            await self._generate_phase_opening_suggestion(ctx, provider=provider)
 
         # 5. Retrieve immediate message history (Layer 1) and call AI
         history = await self._memory_manager.get_messages_for_ai(ctx, db)
@@ -572,6 +617,230 @@ class AgentCore:
                 ctx.session_id,
                 exc_info=True,
             )
+
+    async def _generate_phase_opening_suggestion(
+        self,
+        ctx: AgentContext,
+        provider: Optional[str] = None,
+    ) -> None:
+        """Generate the phase-opening structured suggestion on ``switch_phase()``.
+
+        Calls the AI once to produce a ``PhaseSuggestion`` JSON object for the
+        current phase, parses it, and stores it in ``ctx.phase_suggestion``.
+
+        Non-fatal: any failure is logged at DEBUG and the phase switch
+        continues without a suggestion.  P1 (ICEBREAK) is skipped.
+
+        Design reference: §21.6 of ai-agent-design.md.
+        """
+        import json
+        import logging as _logging
+
+        _log = _logging.getLogger(__name__)
+
+        if ctx.current_phase == Phase.ICEBREAK:
+            return  # P1 has no phase-opening suggestion
+
+        prompt = self._prompt_builder.build_phase_opening_suggestion_prompt(ctx)
+        if not prompt:
+            return
+
+        try:
+            messages = [{"role": "user", "content": prompt}]
+            json_reply = await chat_completion(messages=messages, provider=provider)
+
+            # Strip optional markdown fencing
+            raw = json_reply.strip()
+            if raw.startswith("```"):
+                raw = raw.split("```", 2)[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+                raw = raw.rsplit("```", 1)[0].strip()
+
+            data = json.loads(raw)
+            now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
+
+            suggestion = PhaseSuggestion(phase=ctx.current_phase, generated_at=now)
+
+            if "scenario_refinements" in data:
+                from app.agent.context import RefinementItem, ScenarioRefinementSuggestion
+
+                for sr_raw in data["scenario_refinements"]:
+                    items = [
+                        RefinementItem(
+                            index=item.get("index", i + 1),
+                            question=item.get("question", ""),
+                            options=item.get("options", []),
+                        )
+                        for i, item in enumerate(sr_raw.get("items", []))
+                    ]
+                    suggestion.scenario_refinements.append(
+                        ScenarioRefinementSuggestion(
+                            scenario_id=sr_raw.get("scenario_id", ""),
+                            scenario_name=sr_raw.get("scenario_name", ""),
+                            items=items,
+                        )
+                    )
+
+            if "context_groupings" in data:
+                from app.agent.context import ContextSuggestionItem
+
+                for i, cg in enumerate(data["context_groupings"], start=1):
+                    suggestion.context_groupings.append(
+                        ContextSuggestionItem(
+                            index=cg.get("index", i),
+                            context_name=cg.get("context_name", ""),
+                            concepts=cg.get("concepts", []),
+                            rationale=cg.get("rationale", ""),
+                            alternatives=cg.get("alternatives", []),
+                        )
+                    )
+
+            if "model_designs" in data:
+                from app.agent.context import ModelDesignItem
+
+                for i, md in enumerate(data["model_designs"], start=1):
+                    suggestion.model_designs.append(
+                        ModelDesignItem(
+                            index=md.get("index", i),
+                            context_name=md.get("context_name", ""),
+                            aggregate_root=md.get("aggregate_root", ""),
+                            entities=md.get("entities", []),
+                            value_objects=md.get("value_objects", []),
+                            rationale=md.get("rationale", ""),
+                            alternatives=md.get("alternatives", []),
+                        )
+                    )
+
+            if "review_items" in data:
+                from app.agent.context import ReviewItem
+
+                for i, ri in enumerate(data["review_items"], start=1):
+                    suggestion.review_items.append(
+                        ReviewItem(
+                            index=ri.get("index", i),
+                            severity=ri.get("severity", "中"),
+                            issue_type=ri.get("issue_type", ""),
+                            description=ri.get("description", ""),
+                            suggestion=ri.get("suggestion", ""),
+                            options=ri.get("options", ["接受建议", "标记为无需处理", "自定义修订"]),
+                        )
+                    )
+
+            ctx.phase_suggestion = suggestion
+            _log.info(
+                "Phase-opening suggestion generated for session %s phase=%s "
+                "(scenarios=%d contexts=%d models=%d reviews=%d)",
+                ctx.session_id,
+                ctx.current_phase.value,
+                len(suggestion.scenario_refinements),
+                len(suggestion.context_groupings),
+                len(suggestion.model_designs),
+                len(suggestion.review_items),
+            )
+        except Exception:
+            _log.debug(
+                "Phase-opening suggestion generation failed for session %s (non-fatal)",
+                ctx.session_id,
+                exc_info=True,
+            )
+
+    async def _classify_and_apply_intent(
+        self,
+        ctx: AgentContext,
+        user_message: str,
+        provider: Optional[str] = None,
+    ) -> tuple[str, str]:
+        """Classify the user's intent and apply the corresponding document operation.
+
+        Returns a tuple of:
+        - ``applied_changes_text``: human-readable list of write operations joined
+          by newlines (empty string if nothing was written).
+        - ``out_of_scope_reminder``: system-prompt reminder text to inject when
+          intent is ``OUT_OF_SCOPE`` (empty string otherwise).
+
+        Non-fatal: on any failure the intent degrades to ``PROVIDE_FEEDBACK``
+        (no document writes, no reminder injected), and the method returns
+        two empty strings.
+
+        Design reference: §21.7 of ai-agent-design.md.
+        """
+        import json
+        import logging as _logging
+
+        _log = _logging.getLogger(__name__)
+
+        if ctx.phase_suggestion is None or ctx.current_phase == Phase.ICEBREAK:
+            return "", ""
+
+        try:
+            prompt = self._prompt_builder.build_intent_classification_prompt(
+                ctx, user_message
+            )
+            messages = [{"role": "user", "content": prompt}]
+            json_reply = await chat_completion(messages=messages, provider=provider)
+
+            raw = json_reply.strip()
+            if raw.startswith("```"):
+                raw = raw.split("```", 2)[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+                raw = raw.rsplit("```", 1)[0].strip()
+
+            from app.agent.context import IntentClassification
+
+            data = json.loads(raw)
+            classification = IntentClassification(**data)
+            intent = classification.intent
+
+            _log.info(
+                "UserIntentClassifier: session=%s turn=%d intent=%s target=%s",
+                ctx.session_id,
+                ctx.turn_count,
+                intent.value,
+                classification.target_index,
+            )
+
+        except Exception:
+            _log.debug(
+                "Intent classification failed for session %s (non-fatal, defaulting to PROVIDE_FEEDBACK)",
+                ctx.session_id,
+                exc_info=True,
+            )
+            return "", ""
+
+        applied_changes: List[str] = []
+
+        if intent == UserIntent.MAKE_SELECTION and classification.target_index is not None:
+            change = self._phase_doc_editor.apply_selection(
+                ctx,
+                classification.target_index,
+                classification.selected_option or "",
+                note=classification.raw_feedback,
+            )
+            if change:
+                applied_changes.append(change)
+
+        elif intent == UserIntent.REJECT_SUGGESTION and classification.target_index is not None:
+            change = self._phase_doc_editor.dismiss_item(
+                ctx,
+                classification.target_index,
+                reason=classification.raw_feedback,
+            )
+            if change:
+                applied_changes.append(change)
+
+        elif intent == UserIntent.OUT_OF_SCOPE:
+            reminder = self._out_of_scope_handler.build_reminder(
+                ctx,
+                out_of_scope_hint=classification.out_of_scope_hint,
+            )
+            return "", reminder
+
+        # REQUEST_MORE, REQUEST_REFINE, and PROVIDE_FEEDBACK: no writes here;
+        # the conversational AI handles them naturally.
+
+        return "\n".join(applied_changes), ""
 
     async def _save_phase_document_to_project(
         self,

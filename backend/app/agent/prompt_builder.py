@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from app.agent.context import AgentContext, Phase, PHASE_LABELS
+from typing import List
+
+from app.agent.context import AgentContext, Phase, PHASE_LABELS, UserIntent
 
 # ---------------------------------------------------------------------------
 # Layer 1 – Fixed role definition
@@ -492,3 +494,240 @@ class PromptBuilder:
             )
         lines.append("[/TECH_STACK_BLOCK]")
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # §21 Phase-opening structured suggestion helpers
+    # ------------------------------------------------------------------
+
+    def build_intent_classification_prompt(
+        self,
+        ctx: AgentContext,
+        user_message: str,
+    ) -> str:
+        """Build a lightweight prompt for the ``UserIntentClassifier``.
+
+        The classifier is a separate, stateless AI call that reads only the
+        current user message and the active ``PhaseSuggestion`` content.  It
+        returns a JSON ``IntentClassification`` object.
+
+        Returns a single user-role message string (no history needed).
+        """
+        suggestion = ctx.phase_suggestion
+        if suggestion is None:
+            suggestion_text = "（当前阶段无开场建议）"
+        else:
+            # Render a compact text representation of pending items
+            lines = [f"当前阶段开场建议（phase={suggestion.phase.value}，状态={suggestion.status.value}）："]
+            for sr in suggestion.scenario_refinements:
+                lines.append(f"\n场景：{sr.scenario_id} {sr.scenario_name}")
+                for item in sr.items:
+                    state = "⏳" if item.selected is None and not item.dismissed else ("✅" if item.selected else "❌")
+                    lines.append(
+                        f"  [{item.index}] {state} {item.question} | 备选：{' / '.join(item.options)}"
+                        + (f" | 已选：{item.selected}" if item.selected else "")
+                    )
+            suggestion_text = "\n".join(lines) if len(lines) > 1 else "（建议模板为空）"
+
+        return (
+            "你是意图分类助手，负责将用户消息分类为以下意图之一：\n\n"
+            "  MAKE_SELECTION     — 用户选择了某个备选方案\n"
+            "  REQUEST_MORE       — 用户要求更多建议或问题\n"
+            "  REQUEST_REFINE     — 用户要求对某条问题进一步细化\n"
+            "  REJECT_SUGGESTION  — 用户拒绝/跳过某条建议\n"
+            "  PROVIDE_FEEDBACK   — 用户提供了开放性反馈（与建议相关但不符合上述类型）\n"
+            "  OUT_OF_SCOPE       — 用户请求与当前建议内容完全无关\n\n"
+            "返回 JSON 对象，字段说明：\n"
+            '  "intent"           : 以上意图之一（必填）\n'
+            '  "target_index"     : 涉及哪个序号的建议条目（整数，无则 null）\n'
+            '  "selected_option"  : MAKE_SELECTION 时提取的选择文字（无则 null）\n'
+            '  "raw_feedback"     : PROVIDE_FEEDBACK 时的原文摘要（无则 null）\n'
+            '  "out_of_scope_hint": OUT_OF_SCOPE 时对用户意图的简短描述（无则 null）\n\n'
+            "只返回 JSON 对象，不要任何其他文字或 Markdown 标记。\n\n"
+            "---\n"
+            f"{suggestion_text}\n\n"
+            "---\n"
+            f"用户消息：\n{user_message}"
+        )
+
+    def build_phase_opening_suggestion_prompt(self, ctx: AgentContext) -> str:
+        """Build a prompt that generates the phase-opening structured suggestion JSON.
+
+        Called once at the start of each phase (P2–P5) by
+        ``AgentCore._generate_phase_opening_suggestion()``.  The AI returns
+        a JSON object matching the ``PhaseSuggestion`` schema for the target
+        phase.
+
+        Returns an empty string when the phase does not use this mechanism
+        (e.g. ``ICEBREAK``).
+        """
+        phase = ctx.current_phase
+        dk = ctx.domain_knowledge
+
+        if phase == Phase.REQUIREMENT:
+            # P2: generate per-scenario refinement questions
+            active = [s for s in dk.business_scenarios if s.status.value != "DEPRECATED"]
+            if not active:
+                return ""
+            scenarios_text = "\n".join(
+                f"- {s.id}（{s.name}）：{s.description}" for s in active
+            )
+            return (
+                "你是 DDD 需求细化助手。请根据以下业务场景，为每个场景生成 3~5 个待细化问题，"
+                "每个问题提供 2~4 个备选方案供用户选择。\n\n"
+                "返回 JSON 数组，格式如下（scenario_refinements 字段）：\n"
+                '{\n  "scenario_refinements": [\n'
+                '    {\n      "scenario_id": "S001",\n      "scenario_name": "场景名称",\n'
+                '      "items": [\n'
+                '        {"index": 1, "question": "细化问题", "options": ["方案A", "方案B"]},\n'
+                '        ...\n      ]\n    },\n    ...\n  ]\n}\n\n'
+                "注意：\n"
+                '- question 应为具体的业务决策问题（如"定时发布是否需要支持设置日期和时间？"）\n'
+                '- options 应为 2~4 个具体的备选答案（如 ["是", "否"] 或 ["30秒", "1分钟", "手动保存"]）\n'
+                "- index 从 1 开始，跨场景连续编号（S001 第1~4条，S002 第5~8条，依此类推）\n"
+                "- 只返回 JSON 对象，不要任何其他文字或 Markdown 标记。\n\n"
+                "---\n"
+                f"业务场景列表：\n{scenarios_text}"
+            )
+
+        if phase == Phase.DOMAIN_EXPLORE:
+            # P3: suggest bounded-context groupings
+            concepts = dk.domain_concepts
+            if not concepts:
+                return ""
+            concepts_text = "\n".join(
+                f"- {c.name}（{c.concept_type.value}）：{c.description}" for c in concepts
+            )
+            return (
+                "你是 DDD 限界上下文划分助手。请根据以下领域概念，建议合理的限界上下文分组方案。\n\n"
+                "返回 JSON 对象，格式如下（context_groupings 字段）：\n"
+                '{\n  "context_groupings": [\n'
+                '    {\n      "index": 1,\n      "context_name": "内容管理上下文",\n'
+                '      "concepts": ["文章", "草稿", "分类"],\n'
+                '      "rationale": "均属于内容生命周期管理",\n'
+                '      "alternatives": ["合并到用户上下文", "拆分为 ArticleContext + MediaContext"]\n'
+                '    },\n    ...\n  ]\n}\n\n'
+                "- index 从 1 开始连续编号\n"
+                "- alternatives 提供 1~3 个备选分组方案\n"
+                "- 只返回 JSON 对象，不要任何其他文字或 Markdown 标记。\n\n"
+                "---\n"
+                f"领域概念列表：\n{concepts_text}"
+            )
+
+        if phase == Phase.MODEL_DESIGN:
+            # P4: suggest aggregate/entity/value-object design per context
+            bounded = dk.bounded_contexts
+            concepts = dk.domain_concepts
+            if not concepts:
+                return ""
+            concepts_text = "\n".join(
+                f"- {c.name}（{c.concept_type.value}）：{c.description}" for c in concepts
+            )
+            contexts_text = (
+                "\n".join(f"- {bc.name}：包含概念 {', '.join(bc.concepts[:5])}" for bc in bounded)
+                if bounded
+                else "（尚未划分限界上下文）"
+            )
+            return (
+                "你是 DDD 模型设计助手。请根据以下领域概念和限界上下文，"
+                "为每个上下文建议聚合根/实体/值对象划分方案。\n\n"
+                "返回 JSON 对象，格式如下（model_designs 字段）：\n"
+                '{\n  "model_designs": [\n'
+                '    {\n      "index": 1,\n      "context_name": "内容管理上下文",\n'
+                '      "aggregate_root": "Article",\n'
+                '      "entities": ["Draft", "Category"],\n'
+                '      "value_objects": ["Slug", "PublishTime"],\n'
+                '      "rationale": "Article 是内容生命周期的核心聚合",\n'
+                '      "alternatives": ["将 Draft 设为 Article 的值对象", "将 Category 提升为独立聚合根"]\n'
+                '    },\n    ...\n  ]\n}\n\n'
+                "- 只返回 JSON 对象，不要任何其他文字或 Markdown 标记。\n\n"
+                "---\n"
+                f"限界上下文：\n{contexts_text}\n\n"
+                f"领域概念：\n{concepts_text}"
+            )
+
+        if phase == Phase.REVIEW_REFINE:
+            # P5: review the current domain model and suggest revision points
+            concepts = dk.domain_concepts
+            bounded = dk.bounded_contexts
+            if not concepts:
+                return ""
+            summary = f"领域概念（{len(concepts)} 个）：" + "、".join(c.name for c in concepts[:10])
+            contexts_summary = (
+                "限界上下文：" + "、".join(bc.name for bc in bounded[:5])
+                if bounded else "（尚未划分限界上下文）"
+            )
+            return (
+                "你是 DDD 模型审阅助手。请对以下领域模型做一致性检查，"
+                "列出潜在问题和建议的修订点。\n\n"
+                "返回 JSON 对象，格式如下（review_items 字段）：\n"
+                '{\n  "review_items": [\n'
+                '    {\n      "index": 1,\n      "severity": "高|中|低",\n'
+                '      "issue_type": "一致性问题|边界问题|命名问题|遗漏项",\n'
+                '      "description": "问题描述",\n'
+                '      "suggestion": "修订建议",\n'
+                '      "options": ["接受建议", "标记为无需处理", "自定义修订"]\n'
+                '    },\n    ...\n  ]\n}\n\n'
+                "- 按 severity 降序排列（高→中→低）\n"
+                "- 只返回 JSON 对象，不要任何其他文字或 Markdown 标记。\n\n"
+                "---\n"
+                f"{summary}\n{contexts_summary}"
+            )
+
+        return ""  # ICEBREAK and unknown phases: no suggestion
+
+    def build_structured_reply_instruction(
+        self,
+        ctx: AgentContext,
+        applied_changes: List[str],
+        pending_items_text: str,
+    ) -> str:
+        """Build the three-part structured reply format instruction.
+
+        Injected into the main conversational AI's system prompt when
+        ``PhaseDocumentEditor`` executed at least one write this turn.
+
+        ``applied_changes`` is a list of human-readable change descriptions
+        (one per write operation performed this turn).
+        ``pending_items_text`` is a pre-rendered Markdown block of the items
+        still awaiting user confirmation; pass an empty string if none remain.
+
+        Degrades gracefully:
+        - No applied_changes → omit 【已确定内容】 block.
+        - No pending_items_text → omit 【待确认内容】 block.
+        - Both empty → the instruction is not injected at all (caller guards
+          against calling this with both empty).
+        """
+        sections: List[str] = []
+
+        if applied_changes:
+            confirmed_lines = "\n".join(f"• ✅ {c}" for c in applied_changes)
+            sections.append(
+                "【已确定内容】\n"
+                "以下条目已在本轮写入文档：\n"
+                f"{confirmed_lines}"
+            )
+
+        if pending_items_text:
+            sections.append(
+                "【待确认内容】\n"
+                "以下建议条目仍待用户选择或说明：\n"
+                f"{pending_items_text}"
+            )
+
+        if not sections:
+            return ""
+
+        sections.append(
+            "【其他回答与引导】\n"
+            "回答用户的其他问题（如有），并说明当前阶段进度，引导用户继续。"
+        )
+
+        body = "\n\n─────────────────────────────────────────\n\n".join(sections)
+        return (
+            "[STRUCTURED_REPLY_FORMAT]\n"
+            "请按以下三段式结构输出本轮回复：\n\n"
+            "─────────────────────────────────────────\n\n"
+            + body
+            + "\n\n─────────────────────────────────────────\n"
+            "[/STRUCTURED_REPLY_FORMAT]"
+        )

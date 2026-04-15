@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
-from typing import List, Optional
+from typing import Any, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -237,6 +237,109 @@ class MemoryConfig(BaseModel):
     )
 
 
+# ---------------------------------------------------------------------------
+# Phase-opening structured suggestion (§21 of ai-agent-design.md)
+# ---------------------------------------------------------------------------
+
+
+class SuggestionStatus(str, Enum):
+    PENDING = "PENDING"      # Generated, awaiting user response
+    PARTIAL = "PARTIAL"      # Some items handled
+    COMPLETED = "COMPLETED"  # All items handled or dismissed
+
+
+class UserIntent(str, Enum):
+    MAKE_SELECTION = "MAKE_SELECTION"        # User accepts/selects an option
+    REQUEST_MORE = "REQUEST_MORE"            # User asks for more suggestions
+    REQUEST_REFINE = "REQUEST_REFINE"        # User asks for refinement of an item
+    REJECT_SUGGESTION = "REJECT_SUGGESTION"  # User rejects/dismisses an item
+    PROVIDE_FEEDBACK = "PROVIDE_FEEDBACK"    # User provides open-ended feedback
+    OUT_OF_SCOPE = "OUT_OF_SCOPE"            # Request outside the suggestion scope
+
+
+class IntentClassification(BaseModel):
+    intent: UserIntent
+    target_index: Optional[int] = None        # Which suggestion item (1-based)
+    selected_option: Optional[str] = None     # For MAKE_SELECTION: the chosen option
+    raw_feedback: Optional[str] = None        # For PROVIDE_FEEDBACK: summary text
+    out_of_scope_hint: Optional[str] = None   # For OUT_OF_SCOPE: user intent hint
+
+
+class RefinementItem(BaseModel):
+    index: int                               # 1-based display index
+    question: str                            # The refinement question
+    options: List[str]                       # Alternative answers
+    selected: Optional[str] = None           # User's selection (None = pending)
+    dismissed: bool = False                  # Whether the user dismissed this item
+    note: Optional[str] = None               # Additional notes
+
+
+class ScenarioRefinementSuggestion(BaseModel):
+    """P2 opening suggestion: per-scenario refinement questions."""
+
+    scenario_id: str
+    scenario_name: str
+    items: List[RefinementItem] = Field(default_factory=list)
+    status: SuggestionStatus = SuggestionStatus.PENDING
+
+
+class ContextSuggestionItem(BaseModel):
+    """P3 opening suggestion: proposed bounded-context groupings."""
+
+    index: int
+    context_name: str                        # Suggested bounded context name
+    concepts: List[str]                      # Concepts included
+    rationale: str                           # Reason for grouping
+    alternatives: List[str]                  # Alternative groupings
+    accepted: Optional[bool] = None
+    dismissed: bool = False
+    modifications: Optional[str] = None
+
+
+class ModelDesignItem(BaseModel):
+    """P4 opening suggestion: aggregate/entity/value-object design."""
+
+    index: int
+    context_name: str
+    aggregate_root: str
+    entities: List[str]
+    value_objects: List[str]
+    rationale: str
+    alternatives: List[str]
+    dismissed: bool = False
+    decision: Optional[str] = None
+
+
+class ReviewItem(BaseModel):
+    """P5 opening suggestion: model review and revision points."""
+
+    index: int
+    severity: Literal["高", "中", "低"]
+    issue_type: str                          # "一致性问题" / "边界问题" / etc.
+    description: str
+    suggestion: str
+    options: List[str]
+    dismissed: bool = False
+    resolution: Optional[str] = None
+
+
+class PhaseSuggestion(BaseModel):
+    """Stores the phase-opening structured suggestion and per-item user choices."""
+
+    model_config = {"protected_namespaces": ()}
+
+    phase: Phase
+    generated_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+    status: SuggestionStatus = SuggestionStatus.PENDING
+    # Only the field matching the current phase will be populated
+    scenario_refinements: List[ScenarioRefinementSuggestion] = Field(default_factory=list)
+    context_groupings: List[ContextSuggestionItem] = Field(default_factory=list)
+    model_designs: List[ModelDesignItem] = Field(default_factory=list)
+    review_items: List[ReviewItem] = Field(default_factory=list)
+
+
 class AgentContext(BaseModel):
     session_id: str
     project_id: Optional[str] = None
@@ -269,6 +372,9 @@ class AgentContext(BaseModel):
         description="Number of turns already covered by conversation_summary.",
     )
     memory_config: MemoryConfig = Field(default_factory=MemoryConfig)
+
+    # Phase-opening structured suggestion (§21 of ai-agent-design.md)
+    phase_suggestion: Optional[PhaseSuggestion] = None
 
     def get_stale_documents(self) -> List[str]:
         return [

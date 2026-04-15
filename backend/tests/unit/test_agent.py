@@ -1260,3 +1260,424 @@ class TestMemoryManagerGetMessagesForAI:
         # Should keep at least min turns
         assert len(result) >= ctx.memory_config.min_immediate_memory_turns * 2
 
+
+
+# ---------------------------------------------------------------------------
+# §21 Phase-opening suggestion: context models
+# ---------------------------------------------------------------------------
+
+
+class TestPhaseSuggestionModels:
+    """Tests for new §21 context data models."""
+
+    def test_refinement_item_defaults(self):
+        from app.agent.context import RefinementItem
+
+        item = RefinementItem(index=1, question="Q?", options=["A", "B"])
+        assert item.selected is None
+        assert item.dismissed is False
+        assert item.note is None
+
+    def test_scenario_refinement_suggestion(self):
+        from app.agent.context import (
+            RefinementItem,
+            ScenarioRefinementSuggestion,
+            SuggestionStatus,
+        )
+
+        sr = ScenarioRefinementSuggestion(
+            scenario_id="S001",
+            scenario_name="场景一",
+            items=[
+                RefinementItem(index=1, question="Q1?", options=["是", "否"]),
+                RefinementItem(index=2, question="Q2?", options=["A", "B", "C"]),
+            ],
+        )
+        assert sr.status == SuggestionStatus.PENDING
+        assert len(sr.items) == 2
+
+    def test_phase_suggestion_default_fields(self):
+        from app.agent.context import Phase, PhaseSuggestion, SuggestionStatus
+
+        ps = PhaseSuggestion(phase=Phase.REQUIREMENT)
+        assert ps.status == SuggestionStatus.PENDING
+        assert ps.scenario_refinements == []
+        assert ps.context_groupings == []
+        assert ps.model_designs == []
+        assert ps.review_items == []
+
+    def test_agent_context_has_phase_suggestion_field(self):
+        ctx = make_context()
+        assert ctx.phase_suggestion is None
+
+    def test_user_intent_enum_values(self):
+        from app.agent.context import UserIntent
+
+        assert UserIntent.MAKE_SELECTION == "MAKE_SELECTION"
+        assert UserIntent.OUT_OF_SCOPE == "OUT_OF_SCOPE"
+        assert UserIntent.PROVIDE_FEEDBACK == "PROVIDE_FEEDBACK"
+
+    def test_intent_classification_model(self):
+        from app.agent.context import IntentClassification, UserIntent
+
+        ic = IntentClassification(
+            intent=UserIntent.MAKE_SELECTION,
+            target_index=2,
+            selected_option="是",
+        )
+        assert ic.intent == UserIntent.MAKE_SELECTION
+        assert ic.target_index == 2
+        assert ic.out_of_scope_hint is None
+
+
+# ---------------------------------------------------------------------------
+# §21 PhaseDocumentEditor tests
+# ---------------------------------------------------------------------------
+
+
+class TestPhaseDocumentEditor:
+    """Tests for PhaseDocumentEditor CRUD operations."""
+
+    def _make_ctx_with_suggestion(self, **scenario_items):
+        from app.agent.context import (
+            Phase,
+            PhaseSuggestion,
+            RefinementItem,
+            ScenarioRefinementSuggestion,
+        )
+        from app.agent.phase_document_editor import PhaseDocumentEditor
+
+        ctx = make_context()
+        ctx.current_phase = Phase.REQUIREMENT
+        ctx.phase_suggestion = PhaseSuggestion(
+            phase=Phase.REQUIREMENT,
+            scenario_refinements=[
+                ScenarioRefinementSuggestion(
+                    scenario_id="S001",
+                    scenario_name="编写并发布文章",
+                    items=[
+                        RefinementItem(
+                            index=1, question="定时发布？", options=["是", "否"]
+                        ),
+                        RefinementItem(
+                            index=2,
+                            question="草稿频率？",
+                            options=["30秒", "1分钟", "手动"],
+                        ),
+                        RefinementItem(
+                            index=3, question="摘要来源？", options=["手动", "自动"]
+                        ),
+                    ],
+                )
+            ],
+        )
+        return ctx, PhaseDocumentEditor()
+
+    def test_apply_selection_success(self):
+        from app.agent.context import SuggestionStatus
+
+        ctx, editor = self._make_ctx_with_suggestion()
+        result = editor.apply_selection(ctx, 1, "是")
+        assert result != ""
+        assert ctx.phase_suggestion.scenario_refinements[0].items[0].selected == "是"
+
+    def test_apply_selection_updates_status_to_partial(self):
+        from app.agent.context import SuggestionStatus
+
+        ctx, editor = self._make_ctx_with_suggestion()
+        editor.apply_selection(ctx, 1, "是")
+        assert ctx.phase_suggestion.status == SuggestionStatus.PARTIAL
+
+    def test_apply_selection_all_items_completes_suggestion(self):
+        from app.agent.context import SuggestionStatus
+
+        ctx, editor = self._make_ctx_with_suggestion()
+        editor.apply_selection(ctx, 1, "是")
+        editor.apply_selection(ctx, 2, "30秒")
+        editor.apply_selection(ctx, 3, "手动")
+        assert ctx.phase_suggestion.status == SuggestionStatus.COMPLETED
+
+    def test_apply_selection_invalid_index_returns_empty(self):
+        ctx, editor = self._make_ctx_with_suggestion()
+        result = editor.apply_selection(ctx, 99, "是")
+        assert result == ""
+
+    def test_apply_selection_overwrite_idempotent(self):
+        ctx, editor = self._make_ctx_with_suggestion()
+        editor.apply_selection(ctx, 1, "是")
+        editor.apply_selection(ctx, 1, "否")
+        assert ctx.phase_suggestion.scenario_refinements[0].items[0].selected == "否"
+
+    def test_apply_selection_no_suggestion_returns_empty(self):
+        from app.agent.phase_document_editor import PhaseDocumentEditor
+
+        ctx = make_context()
+        editor = PhaseDocumentEditor()
+        result = editor.apply_selection(ctx, 1, "是")
+        assert result == ""
+
+    def test_dismiss_item_success(self):
+        ctx, editor = self._make_ctx_with_suggestion()
+        result = editor.dismiss_item(ctx, 2, reason="不需要")
+        assert result != ""
+        assert ctx.phase_suggestion.scenario_refinements[0].items[1].dismissed is True
+        assert ctx.phase_suggestion.scenario_refinements[0].items[1].note == "不需要"
+
+    def test_dismiss_item_invalid_index_returns_empty(self):
+        ctx, editor = self._make_ctx_with_suggestion()
+        result = editor.dismiss_item(ctx, 99)
+        assert result == ""
+
+    def test_add_refinement_items_appends(self):
+        from app.agent.context import RefinementItem
+
+        ctx, editor = self._make_ctx_with_suggestion()
+        new_items = [
+            RefinementItem(index=0, question="新问题A?", options=["X", "Y"]),
+            RefinementItem(index=0, question="新问题B?", options=["P", "Q"]),
+        ]
+        count = editor.add_refinement_items(ctx, target_index=1, new_items=new_items)
+        assert count == 2
+        items = ctx.phase_suggestion.scenario_refinements[0].items
+        assert len(items) == 5
+        # New items should get indices 4 and 5
+        assert items[3].index == 4
+        assert items[4].index == 5
+
+    def test_add_refinement_items_invalid_index_returns_zero(self):
+        from app.agent.context import RefinementItem
+
+        ctx, editor = self._make_ctx_with_suggestion()
+        count = editor.add_refinement_items(
+            ctx, target_index=99, new_items=[RefinementItem(index=0, question="Q?", options=["A"])]
+        )
+        assert count == 0
+
+    def test_update_document_field_success(self):
+        from app.agent.phase_document_editor import PhaseDocumentEditor
+
+        ctx = make_context()
+        editor = PhaseDocumentEditor()
+        result = editor.update_document_field(ctx, "project_name", "新项目")
+        assert result is True
+        assert ctx.domain_knowledge.project_name == "新项目"
+
+    def test_update_document_field_invalid_path_returns_false(self):
+        from app.agent.phase_document_editor import PhaseDocumentEditor
+
+        ctx = make_context()
+        editor = PhaseDocumentEditor()
+        result = editor.update_document_field(ctx, "nonexistent.field", "value")
+        assert result is False
+
+
+# ---------------------------------------------------------------------------
+# §21 OutOfScopeHandler tests
+# ---------------------------------------------------------------------------
+
+
+class TestOutOfScopeHandler:
+    """Tests for OutOfScopeHandler.build_reminder()."""
+
+    def _make_ctx_with_pending(self, pending_indices=(1, 2)):
+        from app.agent.context import (
+            Phase,
+            PhaseSuggestion,
+            RefinementItem,
+            ScenarioRefinementSuggestion,
+        )
+
+        ctx = make_context()
+        ctx.current_phase = Phase.REQUIREMENT
+        items = [
+            RefinementItem(index=i, question=f"Q{i}?", options=["A", "B"])
+            for i in pending_indices
+        ]
+        ctx.phase_suggestion = PhaseSuggestion(
+            phase=Phase.REQUIREMENT,
+            scenario_refinements=[
+                ScenarioRefinementSuggestion(
+                    scenario_id="S001", scenario_name="场景", items=items
+                )
+            ],
+        )
+        return ctx
+
+    def test_reminder_contains_system_hint_marker(self):
+        from app.agent.phase_document_editor import OutOfScopeHandler
+
+        ctx = self._make_ctx_with_pending()
+        reminder = OutOfScopeHandler().build_reminder(ctx)
+        assert "[系统提示]" in reminder
+
+    def test_reminder_includes_pending_count(self):
+        from app.agent.phase_document_editor import OutOfScopeHandler
+
+        ctx = self._make_ctx_with_pending([1, 2, 3])
+        reminder = OutOfScopeHandler().build_reminder(ctx)
+        assert "3" in reminder
+
+    def test_reminder_with_hint(self):
+        from app.agent.phase_document_editor import OutOfScopeHandler
+
+        ctx = self._make_ctx_with_pending()
+        reminder = OutOfScopeHandler().build_reminder(ctx, out_of_scope_hint="询问天气")
+        assert "询问天气" in reminder
+
+    def test_reminder_no_suggestion_still_works(self):
+        from app.agent.phase_document_editor import OutOfScopeHandler
+
+        ctx = make_context()
+        reminder = OutOfScopeHandler().build_reminder(ctx)
+        assert "[系统提示]" in reminder
+
+    def test_reminder_all_resolved_no_pending_mention(self):
+        from app.agent.context import (
+            Phase,
+            PhaseSuggestion,
+            RefinementItem,
+            ScenarioRefinementSuggestion,
+        )
+        from app.agent.phase_document_editor import OutOfScopeHandler
+
+        ctx = make_context()
+        ctx.current_phase = Phase.REQUIREMENT
+        items = [
+            RefinementItem(index=1, question="Q1?", options=["A", "B"], selected="A"),
+            RefinementItem(index=2, question="Q2?", options=["X", "Y"], dismissed=True),
+        ]
+        ctx.phase_suggestion = PhaseSuggestion(
+            phase=Phase.REQUIREMENT,
+            scenario_refinements=[
+                ScenarioRefinementSuggestion(
+                    scenario_id="S001", scenario_name="场景", items=items
+                )
+            ],
+        )
+        reminder = OutOfScopeHandler().build_reminder(ctx)
+        assert "已处理完毕" in reminder
+
+
+# ---------------------------------------------------------------------------
+# §21 PromptBuilder new methods tests
+# ---------------------------------------------------------------------------
+
+
+class TestPromptBuilderSuggestionMethods:
+    """Tests for the §21 PromptBuilder methods."""
+
+    def test_build_intent_classification_prompt_no_suggestion(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        prompt = builder.build_intent_classification_prompt(ctx, "你好")
+        assert "意图分类助手" in prompt
+        assert "你好" in prompt
+
+    def test_build_intent_classification_prompt_with_suggestion(self):
+        from app.agent.context import (
+            Phase,
+            PhaseSuggestion,
+            RefinementItem,
+            ScenarioRefinementSuggestion,
+        )
+
+        builder = PromptBuilder()
+        ctx = make_context()
+        ctx.current_phase = Phase.REQUIREMENT
+        ctx.phase_suggestion = PhaseSuggestion(
+            phase=Phase.REQUIREMENT,
+            scenario_refinements=[
+                ScenarioRefinementSuggestion(
+                    scenario_id="S001",
+                    scenario_name="编写文章",
+                    items=[
+                        RefinementItem(index=1, question="定时？", options=["是", "否"])
+                    ],
+                )
+            ],
+        )
+        prompt = builder.build_intent_classification_prompt(ctx, "第1条，选是")
+        assert "MAKE_SELECTION" in prompt
+        assert "第1条，选是" in prompt
+        assert "S001" in prompt
+
+    def test_build_phase_opening_suggestion_prompt_icebreak_returns_empty(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        assert builder.build_phase_opening_suggestion_prompt(ctx) == ""
+
+    def test_build_phase_opening_suggestion_prompt_p2_with_scenarios(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        ctx.current_phase = Phase.REQUIREMENT
+        ctx.domain_knowledge.business_scenarios.append(
+            BusinessScenario(id="S001", name="用户注册", description="用户通过邮箱注册账号")
+        )
+        prompt = builder.build_phase_opening_suggestion_prompt(ctx)
+        assert "scenario_refinements" in prompt
+        assert "S001" in prompt
+
+    def test_build_phase_opening_suggestion_prompt_p2_no_scenarios_returns_empty(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        ctx.current_phase = Phase.REQUIREMENT
+        assert builder.build_phase_opening_suggestion_prompt(ctx) == ""
+
+    def test_build_phase_opening_suggestion_prompt_p3_with_concepts(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        ctx.current_phase = Phase.DOMAIN_EXPLORE
+        ctx.domain_knowledge.domain_concepts.append(
+            DomainConcept(
+                name="订单",
+                concept_type=ConceptType.ENTITY,
+                description="表示一笔购买",
+            )
+        )
+        prompt = builder.build_phase_opening_suggestion_prompt(ctx)
+        assert "context_groupings" in prompt
+        assert "订单" in prompt
+
+    def test_build_structured_reply_instruction_full_three_part(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        instruction = builder.build_structured_reply_instruction(
+            ctx,
+            applied_changes=["问题1：已选择「是」"],
+            pending_items_text="[2] 草稿频率？　备选：30秒 / 1分钟",
+        )
+        assert "已确定内容" in instruction
+        assert "待确认内容" in instruction
+        assert "其他回答与引导" in instruction
+
+    def test_build_structured_reply_instruction_no_applied_two_part(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        instruction = builder.build_structured_reply_instruction(
+            ctx,
+            applied_changes=[],
+            pending_items_text="[1] Q1？　备选：A / B",
+        )
+        assert "已确定内容" not in instruction
+        assert "待确认内容" in instruction
+
+    def test_build_structured_reply_instruction_no_pending_two_part(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        instruction = builder.build_structured_reply_instruction(
+            ctx,
+            applied_changes=["问题1：已选择「是」"],
+            pending_items_text="",
+        )
+        assert "已确定内容" in instruction
+        assert "待确认内容" not in instruction
+
+    def test_build_structured_reply_instruction_both_empty_returns_empty(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        instruction = builder.build_structured_reply_instruction(
+            ctx,
+            applied_changes=[],
+            pending_items_text="",
+        )
+        assert instruction == ""
