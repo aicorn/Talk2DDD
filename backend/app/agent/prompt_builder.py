@@ -521,7 +521,12 @@ class PromptBuilder:
             for sr in suggestion.scenario_refinements:
                 lines.append(f"\n场景：{sr.scenario_id} {sr.scenario_name}")
                 for item in sr.items:
-                    state = "⏳" if item.selected is None and not item.dismissed else ("✅" if item.selected else "❌")
+                    if item.selected is None and not item.dismissed:
+                        state = "⏳"
+                    elif item.selected:
+                        state = "✅"
+                    else:
+                        state = "❌"
                     lines.append(
                         f"  [{item.index}] {state} {item.question} | 备选：{' / '.join(item.options)}"
                         + (f" | 已选：{item.selected}" if item.selected else "")

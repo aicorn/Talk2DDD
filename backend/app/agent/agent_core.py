@@ -650,15 +650,10 @@ class AgentCore:
             json_reply = await chat_completion(messages=messages, provider=provider)
 
             # Strip optional markdown fencing
-            raw = json_reply.strip()
-            if raw.startswith("```"):
-                raw = raw.split("```", 2)[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-                raw = raw.rsplit("```", 1)[0].strip()
+            raw = self._strip_json_fencing(json_reply)
 
             data = json.loads(raw)
-            now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
+            now = datetime.now(timezone.utc)
 
             suggestion = PhaseSuggestion(phase=ctx.current_phase, generated_at=now)
 
@@ -780,12 +775,7 @@ class AgentCore:
             messages = [{"role": "user", "content": prompt}]
             json_reply = await chat_completion(messages=messages, provider=provider)
 
-            raw = json_reply.strip()
-            if raw.startswith("```"):
-                raw = raw.split("```", 2)[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-                raw = raw.rsplit("```", 1)[0].strip()
+            raw = self._strip_json_fencing(json_reply)
 
             from app.agent.context import IntentClassification
 
@@ -947,6 +937,26 @@ class AgentCore:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _strip_json_fencing(raw: str) -> str:
+        """Remove optional Markdown code-fence wrappers from an AI JSON reply.
+
+        Handles::
+
+            ```json
+            ...
+            ```
+
+        and plain JSON (returned as-is).
+        """
+        s = raw.strip()
+        if s.startswith("```"):
+            s = s.split("```", 2)[1]
+            if s.startswith("json"):
+                s = s[4:]
+            s = s.rsplit("```", 1)[0].strip()
+        return s
 
     def _format_concepts(self, ctx: AgentContext) -> List[Dict[str, Any]]:
         return [

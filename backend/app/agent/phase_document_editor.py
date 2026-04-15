@@ -22,6 +22,10 @@ from app.agent.context import (
 
 _log = logging.getLogger(__name__)
 
+# Maximum number of characters to show from a question in human-readable
+# descriptions (used in apply_selection and dismiss_item change messages).
+_MAX_QUESTION_PREVIEW_LENGTH = 30
+
 
 class PhaseDocumentEditor:
     """Performs CRUD operations on ``PhaseSuggestion`` and ``domain_knowledge``
@@ -68,7 +72,7 @@ class PhaseDocumentEditor:
             item.note = note
         self._update_suggestion_status(suggestion)
 
-        msg = f"问题 {target_index}（{item.question[:30]}）：已选择「{selected_option}」"
+        msg = f"问题 {target_index}（{item.question[:_MAX_QUESTION_PREVIEW_LENGTH]}）：已选择「{selected_option}」"
         _log.info(
             "PhaseDocumentEditor.apply_selection: index=%d option=%r session=%s",
             target_index,
@@ -144,7 +148,7 @@ class PhaseDocumentEditor:
             item.note = reason
         self._update_suggestion_status(suggestion)
 
-        msg = f"问题 {target_index}（{item.question[:30]}）：已跳过"
+        msg = f"问题 {target_index}（{item.question[:_MAX_QUESTION_PREVIEW_LENGTH]}）：已跳过"
         _log.info(
             "PhaseDocumentEditor.dismiss_item: index=%d session=%s",
             target_index,
