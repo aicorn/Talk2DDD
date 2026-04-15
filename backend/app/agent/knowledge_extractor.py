@@ -179,6 +179,46 @@ class KnowledgeExtractor:
                 ClarificationQuestion(id=auto_id, question=question)
             )
 
+    def merge_project_info_from_json(self, json_text: str, ctx: AgentContext) -> bool:
+        """Parse a JSON object with project_name/domain_description and merge into *ctx*.
+
+        This method is called after the dedicated project-info extraction AI call
+        in Phase 1 (ICEBREAK) to reconcile any project information that was
+        discussed but not captured via ``<project_info>`` XML tags.
+
+        Only fills fields that are still empty in the context — consistent with
+        the behaviour of ``_extract_project_info()``.
+
+        Returns True if at least one field was updated, False otherwise.
+        """
+        import json as _json
+
+        start = json_text.find("{")
+        end = json_text.rfind("}")
+        if start == -1 or end == -1 or end < start:
+            return False
+
+        try:
+            data = _json.loads(json_text[start : end + 1])
+        except (_json.JSONDecodeError, ValueError):
+            return False
+
+        if not isinstance(data, dict):
+            return False
+
+        updated = False
+        project_name = (data.get("project_name") or "").strip()
+        domain_description = (data.get("domain_description") or "").strip()
+
+        if project_name and not ctx.domain_knowledge.project_name:
+            ctx.domain_knowledge.project_name = project_name
+            updated = True
+        if domain_description and not ctx.domain_knowledge.domain_description:
+            ctx.domain_knowledge.domain_description = domain_description
+            updated = True
+
+        return updated
+
     def merge_concepts_from_json(self, json_text: str, ctx: AgentContext) -> int:
         """Parse a JSON array of domain concepts and merge them into *ctx* in-place.
 

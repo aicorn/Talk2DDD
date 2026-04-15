@@ -427,6 +427,68 @@ class TestKnowledgeExtractor:
         extractor.merge_concepts_from_json(json_text, ctx)
         assert ctx.domain_knowledge.domain_concepts[0].confidence == 0.8
 
+    # merge_project_info_from_json tests
+
+    def test_merge_project_info_from_json_sets_both_fields(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        json_text = '{"project_name": "电商系统", "domain_description": "B2C 电商平台"}'
+        updated = extractor.merge_project_info_from_json(json_text, ctx)
+        assert updated is True
+        assert ctx.domain_knowledge.project_name == "电商系统"
+        assert ctx.domain_knowledge.domain_description == "B2C 电商平台"
+
+    def test_merge_project_info_from_json_does_not_overwrite_existing_name(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        ctx.domain_knowledge.project_name = "已有项目名"
+        json_text = '{"project_name": "新名称", "domain_description": "新描述"}'
+        updated = extractor.merge_project_info_from_json(json_text, ctx)
+        assert ctx.domain_knowledge.project_name == "已有项目名"
+        # domain_description was empty, so it should be filled
+        assert ctx.domain_knowledge.domain_description == "新描述"
+        assert updated is True
+
+    def test_merge_project_info_from_json_does_not_overwrite_existing_description(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        ctx.domain_knowledge.project_name = "已有项目名"
+        ctx.domain_knowledge.domain_description = "已有描述"
+        json_text = '{"project_name": "新名称", "domain_description": "新描述"}'
+        updated = extractor.merge_project_info_from_json(json_text, ctx)
+        assert updated is False
+        assert ctx.domain_knowledge.project_name == "已有项目名"
+        assert ctx.domain_knowledge.domain_description == "已有描述"
+
+    def test_merge_project_info_from_json_handles_invalid_json(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        updated = extractor.merge_project_info_from_json("not valid json", ctx)
+        assert updated is False
+
+    def test_merge_project_info_from_json_handles_empty_fields(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        json_text = '{"project_name": "", "domain_description": ""}'
+        updated = extractor.merge_project_info_from_json(json_text, ctx)
+        assert updated is False
+        assert ctx.domain_knowledge.project_name == ""
+        assert ctx.domain_knowledge.domain_description == ""
+
+    def test_merge_project_info_from_json_extracts_from_surrounding_text(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        json_text = '好的，提取结果：{"project_name": "物流系统", "domain_description": "货运管理平台"} 完成。'
+        updated = extractor.merge_project_info_from_json(json_text, ctx)
+        assert updated is True
+        assert ctx.domain_knowledge.project_name == "物流系统"
+
+    def test_merge_project_info_from_json_returns_false_when_no_braces(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        updated = extractor.merge_project_info_from_json("no braces here", ctx)
+        assert updated is False
+
 
 # ---------------------------------------------------------------------------
 # PromptBuilder tests
@@ -588,6 +650,49 @@ class TestPromptBuilder:
         prompt = builder.build(ctx, phase_switch_trigger=True)
         assert "领域探索开场" not in prompt
         assert "阶段切换模式" in prompt
+
+    def test_build_project_info_reconcile_prompt_returns_string(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        prompt = builder.build_project_info_reconcile_prompt(
+            ctx,
+            user_message="我们在做一个电商项目",
+            ai_reply="好的，您的项目叫电商系统，主要做 B2C 平台。",
+        )
+        assert isinstance(prompt, str)
+        assert "JSON" in prompt
+
+    def test_build_project_info_reconcile_prompt_shows_current_state_when_set(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        ctx.domain_knowledge.project_name = "电商系统"
+        prompt = builder.build_project_info_reconcile_prompt(
+            ctx,
+            user_message="领域是 B2C",
+            ai_reply="好的，领域背景是 B2C 电商平台。",
+        )
+        assert "电商系统" in prompt
+
+    def test_build_project_info_reconcile_prompt_shows_empty_state(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        prompt = builder.build_project_info_reconcile_prompt(
+            ctx,
+            user_message="我们做个系统",
+            ai_reply="请告诉我项目名称。",
+        )
+        assert "尚无" in prompt
+
+    def test_build_project_info_reconcile_prompt_includes_user_and_ai_messages(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        prompt = builder.build_project_info_reconcile_prompt(
+            ctx,
+            user_message="物流系统项目",
+            ai_reply="明白，这是一个物流管理平台。",
+        )
+        assert "物流系统项目" in prompt
+        assert "物流管理平台" in prompt
 
 
 # ---------------------------------------------------------------------------

@@ -157,7 +157,19 @@ class AgentCore:
         prev_ts_confirmed = ctx.tech_stack_preferences.confirmed
         self._knowledge_extractor.extract(ai_reply, ctx)
 
-        # 5b. In the REQUIREMENT phase, run a dedicated scenario-extraction pass to
+        # 5b. In the ICEBREAK phase, run a dedicated project-info extraction pass to
+        #     ensure the project name and domain background discussed in the
+        #     conversation are captured even when the conversational AI omitted
+        #     <project_info> tags.
+        if ctx.current_phase == Phase.ICEBREAK:
+            await self._reconcile_project_info(
+                ctx=ctx,
+                user_message=message,
+                ai_reply=ai_reply,
+                provider=provider,
+            )
+
+        # 5c. In the REQUIREMENT phase, run a dedicated scenario-extraction pass to
         #     ensure all business items discussed in the conversation are captured in
         #     the context even when the conversational AI omitted <scenario> tags.
         if ctx.current_phase == Phase.REQUIREMENT:
@@ -168,7 +180,7 @@ class AgentCore:
                 provider=provider,
             )
 
-        # 5c. In the DOMAIN_EXPLORE phase, run a dedicated concept-extraction pass to
+        # 5d. In the DOMAIN_EXPLORE phase, run a dedicated concept-extraction pass to
         #     ensure all domain concepts discussed in the conversation are captured in
         #     the context even when the conversational AI omitted <concept> tags.
         if ctx.current_phase == Phase.DOMAIN_EXPLORE:
@@ -344,6 +356,50 @@ class AgentCore:
             tech_stack_preferences=self._format_tech_stack(ctx),
             phase_changed=True,
         )
+
+    async def _reconcile_project_info(
+        self,
+        ctx: AgentContext,
+        user_message: str,
+        ai_reply: str,
+        provider: Optional[str] = None,
+    ) -> None:
+        """Run a dedicated extractor AI call to reconcile Phase 1 project info.
+
+        This is the "Extractor Role" in the dual-role pattern for Phase 1
+        (ICEBREAK).  After the main conversational AI response has been
+        processed, a second lightweight AI call is made whose only job is to
+        extract the project name and domain background from the exchange and
+        return them as a JSON object.  The result is merged into
+        ``ctx.domain_knowledge`` so the P1 phase document is always in sync
+        with what was discussed even when the conversational AI omitted
+        ``<project_info>`` tags.
+
+        This call is non-fatal: any exception is silently logged and the
+        regular flow continues uninterrupted.
+        """
+        import logging as _logging
+
+        # Skip if both fields are already populated — nothing more to extract.
+        if (
+            ctx.domain_knowledge.project_name
+            and ctx.domain_knowledge.domain_description
+        ):
+            return
+
+        try:
+            reconcile_prompt = self._prompt_builder.build_project_info_reconcile_prompt(
+                ctx, user_message, ai_reply
+            )
+            messages = [{"role": "user", "content": reconcile_prompt}]
+            json_reply = await chat_completion(messages=messages, provider=provider)
+            self._knowledge_extractor.merge_project_info_from_json(json_reply, ctx)
+        except Exception:
+            _logging.getLogger(__name__).debug(
+                "Project info reconciliation failed for session %s (non-fatal)",
+                ctx.session_id,
+                exc_info=True,
+            )
 
     async def _reconcile_scenarios(
         self,

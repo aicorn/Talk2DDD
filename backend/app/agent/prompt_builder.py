@@ -356,6 +356,46 @@ class PromptBuilder:
             f"AI 回复：\n{ai_reply}"
         )
 
+    def build_project_info_reconcile_prompt(
+        self,
+        ctx: AgentContext,
+        user_message: str,
+        ai_reply: str,
+    ) -> str:
+        """Build a focused extraction prompt for the dedicated Phase 1 reconciler.
+
+        Sent as a second lightweight AI call after each ICEBREAK turn whose sole
+        job is to identify the project name and domain background mentioned in
+        the exchange and return them as a JSON object.  The result is merged
+        into ``ctx.domain_knowledge`` so that the P1 phase document stays in
+        sync with what was discussed even when the conversational AI omitted
+        ``<project_info>`` tags.
+
+        Returns a single user-role message string.
+        """
+        dk = ctx.domain_knowledge
+        if dk.project_name or dk.domain_description:
+            current_block = (
+                "当前已提取信息：\n"
+                f'  project_name: "{dk.project_name or "（未填写）"}"\n'
+                f'  domain_description: "{dk.domain_description or "（未填写）"}"\n\n'
+                "只补充尚未填写的字段；已有值请保持不变，对应字段返回空字符串。"
+            )
+        else:
+            current_block = "当前已提取信息：（尚无）"
+
+        return (
+            "你是项目信息提取助手，负责从对话片段中识别项目名称和领域背景。\n\n"
+            f"{current_block}\n\n"
+            "请从下面这轮对话中提取项目名称和领域背景，以 JSON 对象格式返回：\n"
+            '  {"project_name": "项目名称", "domain_description": "领域背景描述"}\n\n'
+            "如果本轮对话未提及相关信息，或该字段已有值，对应字段返回空字符串。\n"
+            "只返回 JSON 对象，不要任何其他文字或 Markdown 标记。\n\n"
+            "---\n"
+            f"用户说：\n{user_message}\n\n"
+            f"AI 回复：\n{ai_reply}"
+        )
+
     def build_scenario_extraction_prompt(
         self,
         ctx: AgentContext,
