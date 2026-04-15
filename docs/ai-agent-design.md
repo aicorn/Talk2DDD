@@ -2354,20 +2354,22 @@ class UserIntent(str, Enum):
     REQUEST_MORE       = "REQUEST_MORE"        # 用户要求更多建议
     REQUEST_REFINE     = "REQUEST_REFINE"      # 用户要求细化某条目
     REJECT_SUGGESTION  = "REJECT_SUGGESTION"   # 用户拒绝整条建议
-    PROVIDE_FEEDBACK   = "PROVIDE_FEEDBACK"    # 用户提供了开放性反馈
-    OFF_TOPIC          = "OFF_TOPIC"           # 与建议无关的提问
+    PROVIDE_FEEDBACK   = "PROVIDE_FEEDBACK"    # 用户提供了开放性反馈（与建议相关但不符合上述任一类型）
+    OUT_OF_SCOPE       = "OUT_OF_SCOPE"        # 超出当前阶段建议范围的提问或指令
 
 class IntentClassification(BaseModel):
     intent: UserIntent
-    target_index: Optional[int] = None   # 涉及建议的哪个条目（序号）
-    selected_option: Optional[str] = None  # MAKE_SELECTION 时提取的选择
+    target_index: Optional[int] = None    # 涉及建议的哪个条目（序号）
+    selected_option: Optional[str] = None # MAKE_SELECTION 时提取的选择
     raw_feedback: Optional[str] = None    # PROVIDE_FEEDBACK 时的原文摘要
+    out_of_scope_hint: Optional[str] = None  # OUT_OF_SCOPE 时对用户意图的简短描述，用于生成提示语
 ```
 
 **分类器 Prompt 设计原则**：
 - 单独的轻量级 AI 调用（无历史消息，仅包含本轮 user_message + 当前建议模板内容）
 - 返回纯 JSON，不包含自然语言
 - 分类结果缓存在 `AgentContext` 中，供主对话 AI 和文档编辑工具共同使用
+- **`OUT_OF_SCOPE` 的判定**：用户消息与当前阶段的建议模板内容完全无关，或请求执行当前阶段建议体系不支持的操作（如在建议模板之外直接发布最终文档、跳过所有细化问题等）
 
 ---
 
@@ -2384,6 +2386,7 @@ class IntentClassification(BaseModel):
 | `REQUEST_REFINE` (细化) | 在指定条目下追加子问题列表 | CREATE/UPDATE |
 | `REJECT_SUGGESTION` (拒绝) | 将条目标记为 `DISMISSED`，记录拒绝原因 | UPDATE |
 | `PROVIDE_FEEDBACK` (开放反馈) | 将反馈映射为文档的补充说明或新字段 | UPDATE |
+| `OUT_OF_SCOPE` (超出范围) | **不修改文档**；触发 `OutOfScopeHandler` 生成友好提示，告知用户当前可用操作 | 无 |
 
 #### 工具接口定义
 
@@ -2481,15 +2484,23 @@ PhaseDocumentRenderer.render(ctx)  ← 阶段文档包含建议状态
     ├─ REQUEST_MORE ────→ PhaseDocumentEditor.request_more_suggestions()
     ├─ REQUEST_REFINE ──→ PhaseDocumentEditor.add_refinement_items()
     ├─ REJECT_SUGGESTION→ PhaseDocumentEditor.dismiss_item()
-    └─ PROVIDE_FEEDBACK/OFF_TOPIC → 跳过（仅由主对话 AI 处理）
+    ├─ PROVIDE_FEEDBACK → 跳过文档操作（结构由主对话 AI 处理）
+    └─ OUT_OF_SCOPE ────→ OutOfScopeHandler.build_reminder(ctx, hint)
+                          （生成可用操作提示，注入主对话 AI 的 system prompt）
     │
     ▼
 [AI 调用 B] 主对话 AI（Conversational Role）
     │  system prompt 注入：
     │    - 当前阶段指令
     │    - 已更新的 PhaseSuggestion（含用户的选择状态）
-    │    - IntentClassification 结果（供 AI 生成合适回复）
-    │  → 自然语言回复（确认选择 / 展示新建议 / 请求补充）
+    │    - IntentClassification 结果（供 AI 选择回复结构）
+    │    - [若 OUT_OF_SCOPE] 可用操作提示文本（OutOfScopeHandler 生成）
+    │    - [若文档有变更] StructuredReplyBuilder 回复格式指令
+    │
+    │  → 输出（见 §21.12 结构化回复格式）：
+    │      ① 已确定内容区块（若本轮有选择被写入）
+    │      ② 待确认建议区块（等待用户选择或详细说明）
+    │      ③ 其他回答与引导区块
     │
     ▼
 [AI 调用 C] 提取器角色（现有 _reconcile_* 方法）
@@ -2526,28 +2537,184 @@ PhaseDocumentRenderer.render(ctx)
 
 ---
 
-### 21.9 设计约束与边界
+### 21.9 超出范围意图的友好提示（OutOfScopeHandler）
+
+当 `UserIntentClassifier` 返回 `OUT_OF_SCOPE` 时，系统不修改任何文档内容，而是由 `OutOfScopeHandler` 生成一段**上下文感知的友好提示**，注入主对话 AI 的 system prompt，让 AI 以自然语言向用户说明：
+
+1. 当前请求超出了本阶段建议体系的处理范围
+2. 当前阶段可以做的操作列表（根据 `PhaseSuggestion.status` 动态生成）
+3. 引导用户使用建议体系完成阶段目标
+
+#### OutOfScopeHandler 接口
+
+```python
+class OutOfScopeHandler:
+    def build_reminder(
+        self,
+        ctx: AgentContext,
+        out_of_scope_hint: Optional[str] = None,
+    ) -> str:
+        """
+        生成可用操作提示文本，注入主对话 AI 的 system prompt。
+        返回的文本描述：
+          1. 当前阶段未完成的建议条目数量
+          2. 用户当前可以执行的操作列表
+          3. 建议用户下一步做什么
+        """
+```
+
+#### 提示文本示例（P2 阶段）
+
+```
+[系统提示] 用户的请求超出了当前「场景细化建议」的处理范围。
+请友好地告知用户，在当前阶段，你可以帮助他们：
+
+① 对建议中的某个问题做出选择，例如：
+   "第2条，选草稿自动保存30秒"
+   "问题3，选手动填写"
+
+② 要求生成更多细化问题，例如：
+   "S001 还有其他需要细化的问题吗？"
+
+③ 要求对某条问题进一步说明，例如：
+   "问题1，能详细说明两种方案的区别吗？"
+
+④ 拒绝某条不需要的建议，例如：
+   "第4条不需要了"
+
+当前还有 2 个问题待确认（第3、4条）。
+请先完成本阶段建议的确认，再继续其他操作。
+```
+
+#### 可用操作的动态生成规则
+
+```python
+AVAILABLE_ACTIONS_BY_INTENT = {
+    UserIntent.MAKE_SELECTION:    "对某个细化问题做出选择（如：「第2条，选30秒」）",
+    UserIntent.REQUEST_MORE:      "要求生成更多细化问题（如：「还有其他问题吗？」）",
+    UserIntent.REQUEST_REFINE:    "要求对某条问题详细说明（如：「能解释一下方案区别吗？」）",
+    UserIntent.REJECT_SUGGESTION: "跳过某条不需要的建议（如：「第4条不需要了」）",
+    UserIntent.PROVIDE_FEEDBACK:  "直接补充你的想法（如：「我希望支持多图封面」）",
+}
+```
+
+- 仅列出当前 `PhaseSuggestion` 状态下**有意义的**操作（例如：已全部确认则不再提示"做出选择"）
+- 语气保持友好、简洁，不批评用户的输入
+- 提示文本注入 system prompt 后，主对话 AI 负责将其转化为自然语言输出，无固定模板要求
+
+---
+
+### 21.10 涉及模板内容变更时的结构化回复格式（StructuredReplyBuilder）
+
+当 `PhaseDocumentEditor` 本轮执行了至少一次写操作（`apply_selection` / `add_refinement_items` / `dismiss_item` 等），主对话 AI 的回复**必须遵循三段式结构**，由 `StructuredReplyBuilder` 将格式指令注入 system prompt：
+
+#### 三段式回复结构
+
+```
+─────────────────────────────────────────
+【已确定内容】
+  列出本轮通过用户选择或确认写入文档的条目，
+  使用 ✅ 标记，简洁呈现"已选择的内容"。
+
+─────────────────────────────────────────
+【待确认内容】
+  列出本轮新生成或仍待用户选择的建议条目，
+  以编号+细化问题+备选方案的格式呈现，
+  等待用户继续选择或要求进一步说明。
+
+─────────────────────────────────────────
+【其他回答与引导】
+  回答用户的其他问题（如有），或提供当前阶段进度
+  说明、下一步建议等引导性内容。
+─────────────────────────────────────────
+```
+
+#### 回复示例（P2 阶段，用户选择了第2条并要求细化第3条）
+
+```
+✅ 已确定内容
+
+• 问题 2（草稿自动保存频率）：**30秒自动保存**
+
+---
+
+📋 待确认内容
+
+问题 3 — 文章摘要填写方式（已细化）：
+
+| # | 细化说明 | 备选方案 |
+|---|---------|---------|
+| 3a | 摘要字数上限 | 100字 / 150字 / 200字 |
+| 3b | 摘要是否支持 Markdown 格式 | 支持 / 不支持 |
+| 3c | 摘要为空时是否显示正文前N字作为预览 | 是 / 否 |
+
+问题 4 — 发布时需要设置封面图片吗？
+备选方案：**必须** / **可选** / **无封面**
+
+---
+
+💡 其他引导
+
+目前 S001「编写并发布文章」共有 4 个细化问题，已确认 1 个，还有 3 个待处理。
+完成所有细化后，可以输入「下一阶段」进入领域探索。
+```
+
+#### StructuredReplyBuilder 接口
+
+```python
+class StructuredReplyBuilder:
+    def build_reply_format_instruction(
+        self,
+        ctx: AgentContext,
+        applied_changes: List[str],       # 本轮已写入的变更描述列表
+        pending_items: List[RefinementItem],  # 当前待确认条目
+        has_other_reply: bool = True,
+    ) -> str:
+        """
+        生成三段式回复格式指令，注入主对话 AI 的 system prompt。
+        applied_changes 为空时退化为两段式（无【已确定内容】区块）。
+        pending_items 为空时退化为两段式（无【待确认内容】区块）。
+        """
+```
+
+#### 触发条件与退化策略
+
+| 条件 | 回复结构 |
+|------|---------|
+| 本轮有写操作 + 有待确认条目 | 完整三段式（已确定 + 待确认 + 引导） |
+| 本轮有写操作 + 无待确认条目（全部完成） | 两段式（已确定 + 引导：建议进入下一阶段） |
+| 本轮无写操作 + 有待确认条目 | 两段式（待确认 + 引导） |
+| `OUT_OF_SCOPE` 意图 | 一段式（仅引导：可用操作提示） |
+| `PROVIDE_FEEDBACK` 意图 | 由主对话 AI 自由回复，不强制结构 |
+
+---
+
+### 21.11 设计约束与边界
 
 | 约束 | 说明 |
 |------|------|
 | **模板与项目解耦** | 建议模板结构（字段、类型、渲染格式）固化在代码中，不随项目内容变化 |
 | **建议为阶段文档的一部分** | `PhaseSuggestion` 存储在 `AgentContext` 中，通过 `PhaseDocumentRenderer` 渲染到阶段文档，用户的选择即阶段文档的修改 |
-| **意图分类非阻塞** | 若 `UserIntentClassifier` 调用失败或返回 `OFF_TOPIC`，主对话 AI 正常响应，无副作用 |
+| **意图分类非阻塞** | 若 `UserIntentClassifier` 调用失败，退化为 `PROVIDE_FEEDBACK`，主对话 AI 正常响应，无副作用 |
+| **OUT_OF_SCOPE 不修改文档** | `OutOfScopeHandler` 只生成提示文本，不执行任何 `PhaseDocumentEditor` 操作 |
+| **结构化回复退化** | `StructuredReplyBuilder` 在无写操作或无待确认条目时自动退化为更简洁的结构 |
 | **去重与幂等** | `apply_selection()` 对同一条目的重复选择执行覆盖（UPDATE），不追加 |
 | **阶段文档仍是唯一真相** | 建议的最终效果始终体现在 `AgentContext.domain_knowledge` 中，建议本身只是收集信息的界面 |
 | **P1 不触发此机制** | 破冰阶段信息来自零，无上阶段文档可供参考 |
 
 ---
 
-### 21.10 新增组件一览
+### 21.12 新增组件一览
 
 | 组件 | 类型 | 职责 |
 |------|------|------|
 | `PhaseSuggestion` | Pydantic Model (context.py) | 存储当前阶段开场建议及每条目的用户选择状态 |
 | `RefinementItem` / `ContextSuggestionItem` / `ModelDesignItem` / `ReviewItem` | Pydantic Models | 各阶段建议条目的数据结构 |
-| `SuggestionStatus` / `UserIntent` / `IntentClassification` | Enums / Pydantic | 建议状态 + 意图分类结果 |
+| `SuggestionStatus` / `UserIntent` / `IntentClassification` | Enums / Pydantic | 建议状态 + 意图分类结果（含 `OUT_OF_SCOPE`） |
 | `PhaseOpeningSuggestionBuilder` | PromptBuilder 方法 | 生成建议的 AI prompt（每阶段一个方法） |
 | `UserIntentClassifier` | AgentCore 私有方法 | 调用分类 AI，返回 `IntentClassification` |
 | `PhaseDocumentEditor` | 新类 (agent/phase_document_editor.py) | 封装对 `PhaseSuggestion` 和 `domain_knowledge` 的 CRUD 操作 |
+| `OutOfScopeHandler` | 新类 (agent/phase_document_editor.py) | 生成超出范围提示文本，注入主对话 AI 的 system prompt |
+| `StructuredReplyBuilder` | 新类 (agent/prompt_builder.py 方法) | 生成三段式回复格式指令，注入主对话 AI 的 system prompt |
 | `AgentCore._generate_phase_opening_suggestion()` | AgentCore 私有方法 | 在 `switch_phase()` 中触发建议生成 |
 | `AgentCore._classify_and_apply_intent()` | AgentCore 私有方法 | 在 `chat()` 中触发意图分类并调用对应工具 |
