@@ -329,9 +329,14 @@ class AgentCore:
         # 5. Retrieve immediate message history (Layer 1) and call AI
         history = await self._memory_manager.get_messages_for_ai(ctx, db)
 
-        # For DOMAIN_EXPLORE: extract initial domain concepts from Phase 2 scenarios,
-        # then embed the rendered initial document in the trigger message so the AI
-        # can present it to the user and invite feedback.
+        # Build the phase-switch trigger message.
+        #
+        # P3 (DOMAIN_EXPLORE): embed the rendered initial concept document generated
+        #   from Phase 2 scenarios so the AI presents it immediately.
+        # P2 / P4 / P5: if a phase-opening suggestion was successfully generated,
+        #   embed the rendered suggestion table so the AI presents it as a
+        #   structured plan rather than reverting to one-by-one questioning.
+        # All other cases: fall back to the generic trigger strings.
         if ctx.current_phase == Phase.DOMAIN_EXPLORE:
             await self._generate_initial_domain_concepts(ctx, provider=provider)
             initial_doc = self._doc_renderer.render(ctx)
@@ -341,6 +346,26 @@ class AgentCore:
                 f"{initial_doc}\n\n"
                 "请向用户展示这份初版领域概念词汇表，说明这是根据业务场景自动生成的初版，"
                 "邀请用户提出修改意见，并引导进入下一个领域探索问题。"
+            )
+        elif ctx.phase_suggestion is not None and ctx.current_phase in (
+            Phase.REQUIREMENT,
+            Phase.MODEL_DESIGN,
+            Phase.REVIEW_REFINE,
+        ):
+            suggestion_block = self._render_opening_suggestion_block(ctx.phase_suggestion)
+            _phase_labels = {
+                Phase.REQUIREMENT: ("需求收集", "P2", "业务场景细化"),
+                Phase.MODEL_DESIGN: ("模型设计", "P4", "聚合模型设计"),
+                Phase.REVIEW_REFINE: ("审阅完善", "P5", "文档审阅修订"),
+            }
+            label, pnum, goal = _phase_labels[ctx.current_phase]
+            trigger_msg = (
+                f"[系统] 用户手动进入「{label}」阶段（{pnum}）。\n"
+                f"系统已根据已收集的资料，自动生成了本阶段的{goal}建议如下：\n\n"
+                f"{suggestion_block}\n\n"
+                "请直接向用户展示上面的建议表格，简短说明本阶段目标，"
+                "并引导用户针对表中各项作出选择或提出细化意见。"
+                "不要一条一条逐一询问，而是一次性呈现完整建议。"
             )
         else:
             trigger_msg = _PHASE_SWITCH_TRIGGERS.get(
@@ -937,6 +962,73 @@ class AgentCore:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _render_opening_suggestion_block(suggestion: "PhaseSuggestion") -> str:
+        """Render a ``PhaseSuggestion`` as a markdown block for the trigger message.
+
+        The rendered string is embedded in the system trigger so the conversational
+        AI presents a structured table to the user on phase entry instead of falling
+        back to the old one-by-one questioning approach.
+        """
+        from app.agent.context import Phase as _Phase
+
+        lines: list[str] = []
+
+        # ── P2: scenario refinement tables ────────────────────────────────
+        if suggestion.scenario_refinements:
+            lines.append("## 各场景待细化点\n")
+            for sr in suggestion.scenario_refinements:
+                lines.append(f"### {sr.scenario_id} - {sr.scenario_name}\n")
+                lines.append("| 序号 | 细化问题 | 备选方案 |")
+                lines.append("|------|---------|---------|")
+                for item in sr.items:
+                    options_str = " / ".join(item.options) if item.options else "—"
+                    lines.append(f"| {item.index} | {item.question} | {options_str} |")
+                lines.append("")
+
+        # ── P3: context groupings ─────────────────────────────────────────
+        if suggestion.context_groupings:
+            lines.append("## 建议的限界上下文划分方案\n")
+            lines.append("| 序号 | 限界上下文 | 包含概念 | 划分理由 | 备选方案 |")
+            lines.append("|------|-----------|---------|---------|---------|")
+            for item in suggestion.context_groupings:
+                concepts_str = "、".join(item.concepts)
+                alternatives_str = " / ".join(item.alternatives) if item.alternatives else "—"
+                lines.append(
+                    f"| {item.index} | {item.context_name} | {concepts_str} "
+                    f"| {item.rationale} | {alternatives_str} |"
+                )
+            lines.append("")
+
+        # ── P4: model design items ────────────────────────────────────────
+        if suggestion.model_designs:
+            lines.append("## 聚合模型设计建议\n")
+            for item in suggestion.model_designs:
+                lines.append(f"### {item.index}. {item.context_name}\n")
+                lines.append(f"- **聚合根**：{item.aggregate_root}")
+                if item.entities:
+                    lines.append(f"- **实体**：{'、'.join(item.entities)}")
+                if item.value_objects:
+                    lines.append(f"- **值对象**：{'、'.join(item.value_objects)}")
+                lines.append(f"- **理由**：{item.rationale}")
+                if item.alternatives:
+                    lines.append(f"- **备选方案**：{'；'.join(item.alternatives)}")
+                lines.append("")
+
+        # ── P5: review items ──────────────────────────────────────────────
+        if suggestion.review_items:
+            lines.append("## 审阅修订建议\n")
+            lines.append("| 序号 | 严重程度 | 问题类型 | 问题描述 | 修订建议 |")
+            lines.append("|------|---------|---------|---------|---------|")
+            for item in suggestion.review_items:
+                lines.append(
+                    f"| {item.index} | {item.severity} | {item.issue_type} "
+                    f"| {item.description} | {item.suggestion} |"
+                )
+            lines.append("")
+
+        return "\n".join(lines).strip()
 
     @staticmethod
     def _strip_json_fencing(raw: str) -> str:
