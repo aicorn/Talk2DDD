@@ -183,6 +183,42 @@ class TestKnowledgeExtractor:
         assert len(ctx.domain_knowledge.domain_concepts) == 1
         assert ctx.domain_knowledge.domain_concepts[0].confidence == 0.9
 
+    def test_extract_concept_xml_fallback_on_malformed_xml(self):
+        """When <concept> contains a bare & that breaks XML, regex fallback fires."""
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        # Unescaped & is invalid XML — ET.fromstring() raises ParseError
+        reply = '<concept type="ENTITY" name="订单" confidence="0.9">购买 & 支付行为</concept>'
+        extractor.extract(reply, ctx)
+        assert len(ctx.domain_knowledge.domain_concepts) == 1
+        c = ctx.domain_knowledge.domain_concepts[0]
+        assert c.name == "订单"
+        assert c.concept_type == ConceptType.ENTITY
+
+    def test_extract_concept_xml_fallback_preserves_description(self):
+        """Regex fallback preserves tag text as description."""
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        reply = '<concept type="SERVICE" name="支付服务" confidence="0.8">处理 & 验证支付</concept>'
+        extractor.extract(reply, ctx)
+        assert ctx.domain_knowledge.domain_concepts[0].description == "处理 & 验证支付"
+
+    def test_extract_concept_xml_fallback_deduplicates(self):
+        """Regex fallback still deduplicates by name."""
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        ctx.domain_knowledge.domain_concepts.append(
+            DomainConcept(
+                name="订单", concept_type=ConceptType.ENTITY,
+                description="旧描述", confidence=0.7
+            )
+        )
+        reply = '<concept type="ENTITY" name="订单" confidence="0.9">新描述 & 更新内容</concept>'
+        extractor.extract(reply, ctx)
+        assert len(ctx.domain_knowledge.domain_concepts) == 1
+        # Confidence bumped, description updated (non-empty new value)
+        assert ctx.domain_knowledge.domain_concepts[0].confidence == 0.9
+
     def test_extract_scenario(self):
         extractor = KnowledgeExtractor()
         ctx = make_context()
@@ -194,6 +230,40 @@ class TestKnowledgeExtractor:
         s = ctx.domain_knowledge.business_scenarios[0]
         assert s.name == "用户下单"
         assert s.id == "S001"
+
+    def test_extract_scenario_xml_fallback_on_malformed_xml(self):
+        """When <scenario> contains a bare & that breaks XML, regex fallback fires."""
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        # '&' is invalid in XML without escaping — ET.fromstring() will raise ParseError
+        reply = '<scenario id="S003" name="后台内容管理">查看列表 & 编辑更新</scenario>'
+        extractor.extract(reply, ctx)
+        assert len(ctx.domain_knowledge.business_scenarios) == 1
+        s = ctx.domain_knowledge.business_scenarios[0]
+        assert s.name == "后台内容管理"
+        assert s.id == "S003"
+
+    def test_extract_scenario_xml_fallback_preserves_description(self):
+        """Regex fallback preserves the text content as description."""
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        reply = '<scenario id="S002" name="用户退款">退款申请 & 审核流程</scenario>'
+        extractor.extract(reply, ctx)
+        assert ctx.domain_knowledge.business_scenarios[0].description == "退款申请 & 审核流程"
+
+    def test_extract_scenario_xml_fallback_deduplicates(self):
+        """Regex fallback still deduplicates by name."""
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        # Pre-insert same name
+        ctx.domain_knowledge.business_scenarios.append(
+            BusinessScenario(id="S001", name="后台内容管理", description="旧描述")
+        )
+        reply = '<scenario id="S003" name="后台内容管理">新描述 & 新功能</scenario>'
+        extractor.extract(reply, ctx)
+        assert len(ctx.domain_knowledge.business_scenarios) == 1
+        # Description should be updated to the new one (non-empty)
+        assert ctx.domain_knowledge.business_scenarios[0].description == "新描述 & 新功能"
 
     def test_extract_clarification(self):
         extractor = KnowledgeExtractor()
@@ -341,6 +411,154 @@ class TestKnowledgeExtractor:
         added = extractor.merge_scenarios_from_json(json_text, ctx)
         assert added == 0
 
+    # ------------------------------------------------------------------
+    # merge_concepts_from_json tests
+    # ------------------------------------------------------------------
+
+    def test_merge_concepts_from_json_adds_new_concepts(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        json_text = '[{"name": "订单", "type": "ENTITY", "description": "用户购买请求", "confidence": 0.9}]'
+        added = extractor.merge_concepts_from_json(json_text, ctx)
+        assert added == 1
+        assert len(ctx.domain_knowledge.domain_concepts) == 1
+        c = ctx.domain_knowledge.domain_concepts[0]
+        assert c.name == "订单"
+        assert c.concept_type == ConceptType.ENTITY
+        assert c.confidence == 0.9
+
+    def test_merge_concepts_from_json_no_duplicate_by_name(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        ctx.domain_knowledge.domain_concepts.append(
+            DomainConcept(name="订单", concept_type=ConceptType.ENTITY, description="已有描述", confidence=0.8)
+        )
+        json_text = '[{"name": "订单", "type": "ENTITY", "description": "另一描述", "confidence": 0.95}]'
+        added = extractor.merge_concepts_from_json(json_text, ctx)
+        assert added == 0
+        # confidence should be bumped to the higher value
+        assert ctx.domain_knowledge.domain_concepts[0].confidence == 0.95
+        # existing description should not be overwritten
+        assert ctx.domain_knowledge.domain_concepts[0].description == "已有描述"
+
+    def test_merge_concepts_from_json_supplements_empty_description(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        ctx.domain_knowledge.domain_concepts.append(
+            DomainConcept(name="用户", concept_type=ConceptType.ENTITY, description="", confidence=0.7)
+        )
+        json_text = '[{"name": "用户", "type": "ENTITY", "description": "系统使用者", "confidence": 0.8}]'
+        extractor.merge_concepts_from_json(json_text, ctx)
+        assert ctx.domain_knowledge.domain_concepts[0].description == "系统使用者"
+
+    def test_merge_concepts_from_json_handles_empty_array(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        added = extractor.merge_concepts_from_json("[]", ctx)
+        assert added == 0
+        assert len(ctx.domain_knowledge.domain_concepts) == 0
+
+    def test_merge_concepts_from_json_handles_invalid_json(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        added = extractor.merge_concepts_from_json("not valid json", ctx)
+        assert added == 0
+
+    def test_merge_concepts_from_json_extracts_from_surrounding_text(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        json_text = (
+            '以下是提取结果：\n'
+            '[{"name": "商品", "type": "ENTITY", "description": "可购买的物品", "confidence": 0.85}]\n'
+            '完成。'
+        )
+        added = extractor.merge_concepts_from_json(json_text, ctx)
+        assert added == 1
+        assert ctx.domain_knowledge.domain_concepts[0].name == "商品"
+
+    def test_merge_concepts_from_json_skips_items_without_name(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        json_text = '[{"type": "ENTITY", "description": "没有名称"}]'
+        added = extractor.merge_concepts_from_json(json_text, ctx)
+        assert added == 0
+
+    def test_merge_concepts_from_json_defaults_unknown_type_to_entity(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        json_text = '[{"name": "未知类型概念", "type": "UNKNOWN", "description": "描述", "confidence": 0.7}]'
+        extractor.merge_concepts_from_json(json_text, ctx)
+        assert ctx.domain_knowledge.domain_concepts[0].concept_type == ConceptType.ENTITY
+
+    def test_merge_concepts_from_json_handles_missing_confidence(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        json_text = '[{"name": "支付", "type": "EVENT", "description": "支付事件"}]'
+        extractor.merge_concepts_from_json(json_text, ctx)
+        assert ctx.domain_knowledge.domain_concepts[0].confidence == 0.8
+
+    # merge_project_info_from_json tests
+
+    def test_merge_project_info_from_json_sets_both_fields(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        json_text = '{"project_name": "电商系统", "domain_description": "B2C 电商平台"}'
+        updated = extractor.merge_project_info_from_json(json_text, ctx)
+        assert updated is True
+        assert ctx.domain_knowledge.project_name == "电商系统"
+        assert ctx.domain_knowledge.domain_description == "B2C 电商平台"
+
+    def test_merge_project_info_from_json_does_not_overwrite_existing_name(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        ctx.domain_knowledge.project_name = "已有项目名"
+        json_text = '{"project_name": "新名称", "domain_description": "新描述"}'
+        updated = extractor.merge_project_info_from_json(json_text, ctx)
+        assert ctx.domain_knowledge.project_name == "已有项目名"
+        # domain_description was empty, so it should be filled
+        assert ctx.domain_knowledge.domain_description == "新描述"
+        assert updated is True
+
+    def test_merge_project_info_from_json_does_not_overwrite_existing_description(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        ctx.domain_knowledge.project_name = "已有项目名"
+        ctx.domain_knowledge.domain_description = "已有描述"
+        json_text = '{"project_name": "新名称", "domain_description": "新描述"}'
+        updated = extractor.merge_project_info_from_json(json_text, ctx)
+        assert updated is False
+        assert ctx.domain_knowledge.project_name == "已有项目名"
+        assert ctx.domain_knowledge.domain_description == "已有描述"
+
+    def test_merge_project_info_from_json_handles_invalid_json(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        updated = extractor.merge_project_info_from_json("not valid json", ctx)
+        assert updated is False
+
+    def test_merge_project_info_from_json_handles_empty_fields(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        json_text = '{"project_name": "", "domain_description": ""}'
+        updated = extractor.merge_project_info_from_json(json_text, ctx)
+        assert updated is False
+        assert ctx.domain_knowledge.project_name == ""
+        assert ctx.domain_knowledge.domain_description == ""
+
+    def test_merge_project_info_from_json_extracts_from_surrounding_text(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        json_text = '好的，提取结果：{"project_name": "物流系统", "domain_description": "货运管理平台"} 完成。'
+        updated = extractor.merge_project_info_from_json(json_text, ctx)
+        assert updated is True
+        assert ctx.domain_knowledge.project_name == "物流系统"
+
+    def test_merge_project_info_from_json_returns_false_when_no_braces(self):
+        extractor = KnowledgeExtractor()
+        ctx = make_context()
+        updated = extractor.merge_project_info_from_json("no braces here", ctx)
+        assert updated is False
+
 
 # ---------------------------------------------------------------------------
 # PromptBuilder tests
@@ -438,6 +656,165 @@ class TestPromptBuilder:
             ai_reply="好的，报表功能是一个场景。",
         )
         assert "JSON" in prompt
+
+    def test_build_scenario_extraction_prompt_mentions_xml_fallback(self):
+        """Prompt explicitly instructs to include <scenario>-tagged items as XML-parse fallback."""
+        builder = PromptBuilder()
+        ctx = make_context()
+        prompt = builder.build_scenario_extraction_prompt(
+            ctx,
+            user_message="确认 S003 后台内容管理场景",
+            ai_reply='<scenario id="S003" name="后台内容管理">博主登录后台管理内容</scenario>',
+        )
+        assert "XML" in prompt or "scenario" in prompt
+
+    def test_build_scenario_extraction_prompt_does_not_prohibit_repeats(self):
+        """Existing scenarios should be listed but NOT marked as forbidden to return."""
+        builder = PromptBuilder()
+        ctx = make_context()
+        ctx.domain_knowledge.business_scenarios.append(
+            BusinessScenario(id="S001", name="用户注册", description="用户创建账号")
+        )
+        prompt = builder.build_scenario_extraction_prompt(
+            ctx,
+            user_message="确认 S001 用户注册场景",
+            ai_reply="好的，用户注册场景已确认。",
+        )
+        # Must NOT say "请勿重复" — the merge function handles dedup
+        assert "请勿重复" not in prompt
+
+    def test_build_initial_domain_concept_extraction_prompt_returns_empty_when_no_scenarios(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        prompt = builder.build_initial_domain_concept_extraction_prompt(ctx)
+        assert prompt == ""
+
+    def test_build_initial_domain_concept_extraction_prompt_includes_scenarios(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        ctx.domain_knowledge.business_scenarios.append(
+            BusinessScenario(id="S001", name="用户注册", description="用户创建账号")
+        )
+        prompt = builder.build_initial_domain_concept_extraction_prompt(ctx)
+        assert "用户注册" in prompt
+        assert "JSON" in prompt
+
+    def test_build_initial_domain_concept_extraction_prompt_excludes_deprecated(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        ctx.domain_knowledge.business_scenarios.append(
+            BusinessScenario(id="S001", name="弃用场景", description="已弃用", status=ScenarioStatus.DEPRECATED)
+        )
+        prompt = builder.build_initial_domain_concept_extraction_prompt(ctx)
+        assert prompt == ""
+
+    def test_build_domain_concept_reconcile_prompt_returns_string(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        prompt = builder.build_domain_concept_reconcile_prompt(
+            ctx,
+            user_message="订单是核心概念",
+            ai_reply="是的，订单是一个实体。",
+        )
+        assert isinstance(prompt, str)
+        assert "JSON" in prompt
+
+    def test_build_domain_concept_reconcile_prompt_includes_existing_concepts(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        ctx.domain_knowledge.domain_concepts.append(
+            DomainConcept(name="订单", concept_type=ConceptType.ENTITY, description="购买请求")
+        )
+        prompt = builder.build_domain_concept_reconcile_prompt(
+            ctx,
+            user_message="还有用户概念",
+            ai_reply="用户是系统的使用者。",
+        )
+        assert "订单" in prompt
+
+    def test_build_domain_concept_reconcile_prompt_mentions_xml_fallback(self):
+        """Prompt explicitly instructs to include <concept>-tagged items as XML-parse fallback."""
+        builder = PromptBuilder()
+        ctx = make_context()
+        prompt = builder.build_domain_concept_reconcile_prompt(
+            ctx,
+            user_message="确认订单概念",
+            ai_reply='<concept type="ENTITY" name="订单" confidence="0.9">购买 & 支付</concept>',
+        )
+        assert "XML" in prompt or "concept" in prompt
+
+    def test_build_domain_concept_reconcile_prompt_does_not_prohibit_repeats(self):
+        """Existing concepts listed as reference only — no 'please don't repeat' restriction."""
+        builder = PromptBuilder()
+        ctx = make_context()
+        ctx.domain_knowledge.domain_concepts.append(
+            DomainConcept(name="订单", concept_type=ConceptType.ENTITY, description="购买请求")
+        )
+        prompt = builder.build_domain_concept_reconcile_prompt(
+            ctx,
+            user_message="确认订单概念",
+            ai_reply="好的，订单概念已确认。",
+        )
+        # Must NOT say "请勿重复" — the merge function handles dedup
+        assert "请勿重复" not in prompt
+
+    def test_phase_switch_trigger_domain_explore_uses_special_instruction(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        ctx.current_phase = Phase.DOMAIN_EXPLORE
+        prompt = builder.build(ctx, phase_switch_trigger=True)
+        assert "领域探索开场" in prompt
+
+    def test_phase_switch_trigger_other_phase_uses_generic_instruction(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        ctx.current_phase = Phase.REQUIREMENT
+        prompt = builder.build(ctx, phase_switch_trigger=True)
+        assert "领域探索开场" not in prompt
+        assert "阶段切换模式" in prompt
+
+    def test_build_project_info_reconcile_prompt_returns_string(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        prompt = builder.build_project_info_reconcile_prompt(
+            ctx,
+            user_message="我们在做一个电商项目",
+            ai_reply="好的，您的项目叫电商系统，主要做 B2C 平台。",
+        )
+        assert isinstance(prompt, str)
+        assert "JSON" in prompt
+
+    def test_build_project_info_reconcile_prompt_shows_current_state_when_set(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        ctx.domain_knowledge.project_name = "电商系统"
+        prompt = builder.build_project_info_reconcile_prompt(
+            ctx,
+            user_message="领域是 B2C",
+            ai_reply="好的，领域背景是 B2C 电商平台。",
+        )
+        assert "电商系统" in prompt
+
+    def test_build_project_info_reconcile_prompt_shows_empty_state(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        prompt = builder.build_project_info_reconcile_prompt(
+            ctx,
+            user_message="我们做个系统",
+            ai_reply="请告诉我项目名称。",
+        )
+        assert "尚无" in prompt
+
+    def test_build_project_info_reconcile_prompt_includes_user_and_ai_messages(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        prompt = builder.build_project_info_reconcile_prompt(
+            ctx,
+            user_message="物流系统项目",
+            ai_reply="明白，这是一个物流管理平台。",
+        )
+        assert "物流系统项目" in prompt
+        assert "物流管理平台" in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -883,3 +1260,424 @@ class TestMemoryManagerGetMessagesForAI:
         # Should keep at least min turns
         assert len(result) >= ctx.memory_config.min_immediate_memory_turns * 2
 
+
+
+# ---------------------------------------------------------------------------
+# §21 Phase-opening suggestion: context models
+# ---------------------------------------------------------------------------
+
+
+class TestPhaseSuggestionModels:
+    """Tests for new §21 context data models."""
+
+    def test_refinement_item_defaults(self):
+        from app.agent.context import RefinementItem
+
+        item = RefinementItem(index=1, question="Q?", options=["A", "B"])
+        assert item.selected is None
+        assert item.dismissed is False
+        assert item.note is None
+
+    def test_scenario_refinement_suggestion(self):
+        from app.agent.context import (
+            RefinementItem,
+            ScenarioRefinementSuggestion,
+            SuggestionStatus,
+        )
+
+        sr = ScenarioRefinementSuggestion(
+            scenario_id="S001",
+            scenario_name="场景一",
+            items=[
+                RefinementItem(index=1, question="Q1?", options=["是", "否"]),
+                RefinementItem(index=2, question="Q2?", options=["A", "B", "C"]),
+            ],
+        )
+        assert sr.status == SuggestionStatus.PENDING
+        assert len(sr.items) == 2
+
+    def test_phase_suggestion_default_fields(self):
+        from app.agent.context import Phase, PhaseSuggestion, SuggestionStatus
+
+        ps = PhaseSuggestion(phase=Phase.REQUIREMENT)
+        assert ps.status == SuggestionStatus.PENDING
+        assert ps.scenario_refinements == []
+        assert ps.context_groupings == []
+        assert ps.model_designs == []
+        assert ps.review_items == []
+
+    def test_agent_context_has_phase_suggestion_field(self):
+        ctx = make_context()
+        assert ctx.phase_suggestion is None
+
+    def test_user_intent_enum_values(self):
+        from app.agent.context import UserIntent
+
+        assert UserIntent.MAKE_SELECTION == "MAKE_SELECTION"
+        assert UserIntent.OUT_OF_SCOPE == "OUT_OF_SCOPE"
+        assert UserIntent.PROVIDE_FEEDBACK == "PROVIDE_FEEDBACK"
+
+    def test_intent_classification_model(self):
+        from app.agent.context import IntentClassification, UserIntent
+
+        ic = IntentClassification(
+            intent=UserIntent.MAKE_SELECTION,
+            target_index=2,
+            selected_option="是",
+        )
+        assert ic.intent == UserIntent.MAKE_SELECTION
+        assert ic.target_index == 2
+        assert ic.out_of_scope_hint is None
+
+
+# ---------------------------------------------------------------------------
+# §21 PhaseDocumentEditor tests
+# ---------------------------------------------------------------------------
+
+
+class TestPhaseDocumentEditor:
+    """Tests for PhaseDocumentEditor CRUD operations."""
+
+    def _make_ctx_with_suggestion(self, **scenario_items):
+        from app.agent.context import (
+            Phase,
+            PhaseSuggestion,
+            RefinementItem,
+            ScenarioRefinementSuggestion,
+        )
+        from app.agent.phase_document_editor import PhaseDocumentEditor
+
+        ctx = make_context()
+        ctx.current_phase = Phase.REQUIREMENT
+        ctx.phase_suggestion = PhaseSuggestion(
+            phase=Phase.REQUIREMENT,
+            scenario_refinements=[
+                ScenarioRefinementSuggestion(
+                    scenario_id="S001",
+                    scenario_name="编写并发布文章",
+                    items=[
+                        RefinementItem(
+                            index=1, question="定时发布？", options=["是", "否"]
+                        ),
+                        RefinementItem(
+                            index=2,
+                            question="草稿频率？",
+                            options=["30秒", "1分钟", "手动"],
+                        ),
+                        RefinementItem(
+                            index=3, question="摘要来源？", options=["手动", "自动"]
+                        ),
+                    ],
+                )
+            ],
+        )
+        return ctx, PhaseDocumentEditor()
+
+    def test_apply_selection_success(self):
+        from app.agent.context import SuggestionStatus
+
+        ctx, editor = self._make_ctx_with_suggestion()
+        result = editor.apply_selection(ctx, 1, "是")
+        assert result != ""
+        assert ctx.phase_suggestion.scenario_refinements[0].items[0].selected == "是"
+
+    def test_apply_selection_updates_status_to_partial(self):
+        from app.agent.context import SuggestionStatus
+
+        ctx, editor = self._make_ctx_with_suggestion()
+        editor.apply_selection(ctx, 1, "是")
+        assert ctx.phase_suggestion.status == SuggestionStatus.PARTIAL
+
+    def test_apply_selection_all_items_completes_suggestion(self):
+        from app.agent.context import SuggestionStatus
+
+        ctx, editor = self._make_ctx_with_suggestion()
+        editor.apply_selection(ctx, 1, "是")
+        editor.apply_selection(ctx, 2, "30秒")
+        editor.apply_selection(ctx, 3, "手动")
+        assert ctx.phase_suggestion.status == SuggestionStatus.COMPLETED
+
+    def test_apply_selection_invalid_index_returns_empty(self):
+        ctx, editor = self._make_ctx_with_suggestion()
+        result = editor.apply_selection(ctx, 99, "是")
+        assert result == ""
+
+    def test_apply_selection_overwrite_idempotent(self):
+        ctx, editor = self._make_ctx_with_suggestion()
+        editor.apply_selection(ctx, 1, "是")
+        editor.apply_selection(ctx, 1, "否")
+        assert ctx.phase_suggestion.scenario_refinements[0].items[0].selected == "否"
+
+    def test_apply_selection_no_suggestion_returns_empty(self):
+        from app.agent.phase_document_editor import PhaseDocumentEditor
+
+        ctx = make_context()
+        editor = PhaseDocumentEditor()
+        result = editor.apply_selection(ctx, 1, "是")
+        assert result == ""
+
+    def test_dismiss_item_success(self):
+        ctx, editor = self._make_ctx_with_suggestion()
+        result = editor.dismiss_item(ctx, 2, reason="不需要")
+        assert result != ""
+        assert ctx.phase_suggestion.scenario_refinements[0].items[1].dismissed is True
+        assert ctx.phase_suggestion.scenario_refinements[0].items[1].note == "不需要"
+
+    def test_dismiss_item_invalid_index_returns_empty(self):
+        ctx, editor = self._make_ctx_with_suggestion()
+        result = editor.dismiss_item(ctx, 99)
+        assert result == ""
+
+    def test_add_refinement_items_appends(self):
+        from app.agent.context import RefinementItem
+
+        ctx, editor = self._make_ctx_with_suggestion()
+        new_items = [
+            RefinementItem(index=0, question="新问题A?", options=["X", "Y"]),
+            RefinementItem(index=0, question="新问题B?", options=["P", "Q"]),
+        ]
+        count = editor.add_refinement_items(ctx, target_index=1, new_items=new_items)
+        assert count == 2
+        items = ctx.phase_suggestion.scenario_refinements[0].items
+        assert len(items) == 5
+        # New items should get indices 4 and 5
+        assert items[3].index == 4
+        assert items[4].index == 5
+
+    def test_add_refinement_items_invalid_index_returns_zero(self):
+        from app.agent.context import RefinementItem
+
+        ctx, editor = self._make_ctx_with_suggestion()
+        count = editor.add_refinement_items(
+            ctx, target_index=99, new_items=[RefinementItem(index=0, question="Q?", options=["A"])]
+        )
+        assert count == 0
+
+    def test_update_document_field_success(self):
+        from app.agent.phase_document_editor import PhaseDocumentEditor
+
+        ctx = make_context()
+        editor = PhaseDocumentEditor()
+        result = editor.update_document_field(ctx, "project_name", "新项目")
+        assert result is True
+        assert ctx.domain_knowledge.project_name == "新项目"
+
+    def test_update_document_field_invalid_path_returns_false(self):
+        from app.agent.phase_document_editor import PhaseDocumentEditor
+
+        ctx = make_context()
+        editor = PhaseDocumentEditor()
+        result = editor.update_document_field(ctx, "nonexistent.field", "value")
+        assert result is False
+
+
+# ---------------------------------------------------------------------------
+# §21 OutOfScopeHandler tests
+# ---------------------------------------------------------------------------
+
+
+class TestOutOfScopeHandler:
+    """Tests for OutOfScopeHandler.build_reminder()."""
+
+    def _make_ctx_with_pending(self, pending_indices=(1, 2)):
+        from app.agent.context import (
+            Phase,
+            PhaseSuggestion,
+            RefinementItem,
+            ScenarioRefinementSuggestion,
+        )
+
+        ctx = make_context()
+        ctx.current_phase = Phase.REQUIREMENT
+        items = [
+            RefinementItem(index=i, question=f"Q{i}?", options=["A", "B"])
+            for i in pending_indices
+        ]
+        ctx.phase_suggestion = PhaseSuggestion(
+            phase=Phase.REQUIREMENT,
+            scenario_refinements=[
+                ScenarioRefinementSuggestion(
+                    scenario_id="S001", scenario_name="场景", items=items
+                )
+            ],
+        )
+        return ctx
+
+    def test_reminder_contains_system_hint_marker(self):
+        from app.agent.phase_document_editor import OutOfScopeHandler
+
+        ctx = self._make_ctx_with_pending()
+        reminder = OutOfScopeHandler().build_reminder(ctx)
+        assert "[系统提示]" in reminder
+
+    def test_reminder_includes_pending_count(self):
+        from app.agent.phase_document_editor import OutOfScopeHandler
+
+        ctx = self._make_ctx_with_pending([1, 2, 3])
+        reminder = OutOfScopeHandler().build_reminder(ctx)
+        assert "3" in reminder
+
+    def test_reminder_with_hint(self):
+        from app.agent.phase_document_editor import OutOfScopeHandler
+
+        ctx = self._make_ctx_with_pending()
+        reminder = OutOfScopeHandler().build_reminder(ctx, out_of_scope_hint="询问天气")
+        assert "询问天气" in reminder
+
+    def test_reminder_no_suggestion_still_works(self):
+        from app.agent.phase_document_editor import OutOfScopeHandler
+
+        ctx = make_context()
+        reminder = OutOfScopeHandler().build_reminder(ctx)
+        assert "[系统提示]" in reminder
+
+    def test_reminder_all_resolved_no_pending_mention(self):
+        from app.agent.context import (
+            Phase,
+            PhaseSuggestion,
+            RefinementItem,
+            ScenarioRefinementSuggestion,
+        )
+        from app.agent.phase_document_editor import OutOfScopeHandler
+
+        ctx = make_context()
+        ctx.current_phase = Phase.REQUIREMENT
+        items = [
+            RefinementItem(index=1, question="Q1?", options=["A", "B"], selected="A"),
+            RefinementItem(index=2, question="Q2?", options=["X", "Y"], dismissed=True),
+        ]
+        ctx.phase_suggestion = PhaseSuggestion(
+            phase=Phase.REQUIREMENT,
+            scenario_refinements=[
+                ScenarioRefinementSuggestion(
+                    scenario_id="S001", scenario_name="场景", items=items
+                )
+            ],
+        )
+        reminder = OutOfScopeHandler().build_reminder(ctx)
+        assert "已处理完毕" in reminder
+
+
+# ---------------------------------------------------------------------------
+# §21 PromptBuilder new methods tests
+# ---------------------------------------------------------------------------
+
+
+class TestPromptBuilderSuggestionMethods:
+    """Tests for the §21 PromptBuilder methods."""
+
+    def test_build_intent_classification_prompt_no_suggestion(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        prompt = builder.build_intent_classification_prompt(ctx, "你好")
+        assert "意图分类助手" in prompt
+        assert "你好" in prompt
+
+    def test_build_intent_classification_prompt_with_suggestion(self):
+        from app.agent.context import (
+            Phase,
+            PhaseSuggestion,
+            RefinementItem,
+            ScenarioRefinementSuggestion,
+        )
+
+        builder = PromptBuilder()
+        ctx = make_context()
+        ctx.current_phase = Phase.REQUIREMENT
+        ctx.phase_suggestion = PhaseSuggestion(
+            phase=Phase.REQUIREMENT,
+            scenario_refinements=[
+                ScenarioRefinementSuggestion(
+                    scenario_id="S001",
+                    scenario_name="编写文章",
+                    items=[
+                        RefinementItem(index=1, question="定时？", options=["是", "否"])
+                    ],
+                )
+            ],
+        )
+        prompt = builder.build_intent_classification_prompt(ctx, "第1条，选是")
+        assert "MAKE_SELECTION" in prompt
+        assert "第1条，选是" in prompt
+        assert "S001" in prompt
+
+    def test_build_phase_opening_suggestion_prompt_icebreak_returns_empty(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        assert builder.build_phase_opening_suggestion_prompt(ctx) == ""
+
+    def test_build_phase_opening_suggestion_prompt_p2_with_scenarios(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        ctx.current_phase = Phase.REQUIREMENT
+        ctx.domain_knowledge.business_scenarios.append(
+            BusinessScenario(id="S001", name="用户注册", description="用户通过邮箱注册账号")
+        )
+        prompt = builder.build_phase_opening_suggestion_prompt(ctx)
+        assert "scenario_refinements" in prompt
+        assert "S001" in prompt
+
+    def test_build_phase_opening_suggestion_prompt_p2_no_scenarios_returns_empty(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        ctx.current_phase = Phase.REQUIREMENT
+        assert builder.build_phase_opening_suggestion_prompt(ctx) == ""
+
+    def test_build_phase_opening_suggestion_prompt_p3_with_concepts(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        ctx.current_phase = Phase.DOMAIN_EXPLORE
+        ctx.domain_knowledge.domain_concepts.append(
+            DomainConcept(
+                name="订单",
+                concept_type=ConceptType.ENTITY,
+                description="表示一笔购买",
+            )
+        )
+        prompt = builder.build_phase_opening_suggestion_prompt(ctx)
+        assert "context_groupings" in prompt
+        assert "订单" in prompt
+
+    def test_build_structured_reply_instruction_full_three_part(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        instruction = builder.build_structured_reply_instruction(
+            ctx,
+            applied_changes=["问题1：已选择「是」"],
+            pending_items_text="[2] 草稿频率？　备选：30秒 / 1分钟",
+        )
+        assert "已确定内容" in instruction
+        assert "待确认内容" in instruction
+        assert "其他回答与引导" in instruction
+
+    def test_build_structured_reply_instruction_no_applied_two_part(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        instruction = builder.build_structured_reply_instruction(
+            ctx,
+            applied_changes=[],
+            pending_items_text="[1] Q1？　备选：A / B",
+        )
+        assert "已确定内容" not in instruction
+        assert "待确认内容" in instruction
+
+    def test_build_structured_reply_instruction_no_pending_two_part(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        instruction = builder.build_structured_reply_instruction(
+            ctx,
+            applied_changes=["问题1：已选择「是」"],
+            pending_items_text="",
+        )
+        assert "已确定内容" in instruction
+        assert "待确认内容" not in instruction
+
+    def test_build_structured_reply_instruction_both_empty_returns_empty(self):
+        builder = PromptBuilder()
+        ctx = make_context()
+        instruction = builder.build_structured_reply_instruction(
+            ctx,
+            applied_changes=[],
+            pending_items_text="",
+        )
+        assert instruction == ""

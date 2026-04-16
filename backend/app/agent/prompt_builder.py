@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from app.agent.context import AgentContext, Phase, PHASE_LABELS
+from typing import List
+
+from app.agent.context import AgentContext, Phase, PHASE_LABELS, UserIntent
 
 # ---------------------------------------------------------------------------
 # Layer 1 – Fixed role definition
@@ -55,13 +57,18 @@ _XML_EXTRACTION_FORMAT = """【结构化提取规则】
 # ---------------------------------------------------------------------------
 _PHASE_INSTRUCTIONS: dict[Phase, str] = {
     Phase.ICEBREAK: """【当前阶段：破冰引入 P1/5】
-目标：了解用户角色和项目背景，放松引导
+目标：收集「项目简介」文档所需的两项信息——项目名称和领域背景简述
+
+本阶段文档仅包含两个字段：
+  • 项目名称：项目的正式名称或简称
+  • 领域背景：用 1~3 句话说明项目所处领域及其核心定位
 
 任务：
-1. 热情欢迎用户，简要介绍 Talk2DDD 能帮助他们做什么
-2. 引导用户介绍项目背景（项目是做什么的？解决什么业务问题？谁是核心用户？）
-3. 每次只问一个问题，语气轻松友好
-4. 收集到项目名称和领域背景后，告知用户信息已足够，提示点击顶部导航栏右侧的「下一阶段 →」按钮进入需求收集阶段（不要自动切换阶段）
+1. 热情欢迎用户，用一句话介绍 Talk2DDD 能帮助他们完成 DDD 建模
+2. 先问项目名称，再问领域背景（一句话即可）；每次只问一个问题
+3. 收集到以上两项信息后，立即告知用户「项目简介」已生成，提示点击顶部导航栏右侧的「下一阶段 →」按钮进入需求收集阶段（不要自动切换阶段）
+
+【严格限制】本阶段只收集项目名称和领域背景，不要询问业务场景、用户角色、核心功能、业务流程等内容，这些属于下一阶段（需求收集 P2）的工作。
 
 当识别到项目名称和领域背景时，嵌入 <project_info> 标记。""",
 
@@ -154,6 +161,17 @@ _PHASE_SWITCH_INSTRUCTION = """【阶段切换模式】
 4. 提出 1~2 个本阶段的首要行动项或引导问题
 语气积极、简洁，避免重复已知信息，不要在回复中输出任何 XML 标记。"""
 
+# Phase-specific override for DOMAIN_EXPLORE entry
+_PHASE_SWITCH_INSTRUCTION_DOMAIN_EXPLORE = """【阶段切换模式 - 领域探索开场】
+本轮对话由用户手动切换到「领域探索」阶段触发。系统已根据上一阶段的业务场景自动提炼了初版领域概念词汇表，并作为参考内容附在用户消息中。
+请生成一段结构化的「领域探索开场消息」，内容包括：
+1. 一句话欢迎进入第 3 阶段「领域探索」，说明本阶段目标（从业务场景中提炼领域术语，建立通用语言）
+2. 告知用户：已根据已收集的业务场景自动提炼了初版领域概念词汇表
+3. 完整展示用户消息中提供的初版领域概念词汇表（保持 Markdown 表格格式，如表格为空则说明尚未识别到概念）
+4. 邀请用户提出修改意见：哪些概念需要调整？是否有遗漏的业务对象或业务规则？
+5. 提出 1 个具体的引导问题，帮助用户进一步确认或补充领域概念
+不要在回复中输出任何 XML 标记。"""
+
 
 class PromptBuilder:
     """Assembles the layered system prompt for the current phase and context."""
@@ -179,7 +197,12 @@ class PromptBuilder:
             _XML_EXTRACTION_FORMAT,         # Layers 5+6
         ]
         if phase_switch_trigger:
-            layers.append(_PHASE_SWITCH_INSTRUCTION)
+            switch_instruction = (
+                _PHASE_SWITCH_INSTRUCTION_DOMAIN_EXPLORE
+                if ctx.current_phase == Phase.DOMAIN_EXPLORE
+                else _PHASE_SWITCH_INSTRUCTION
+            )
+            layers.append(switch_instruction)
         return "\n\n---\n\n".join(layer.strip() for layer in layers if layer.strip())
 
     # ------------------------------------------------------------------
@@ -259,6 +282,125 @@ class PromptBuilder:
 
         return "\n".join(lines)
 
+    def build_initial_domain_concept_extraction_prompt(self, ctx: AgentContext) -> str:
+        """Build a prompt for extracting initial domain concepts from business scenarios.
+
+        Called once when the session first enters DOMAIN_EXPLORE so that a
+        seed set of concepts is available for the opening phase document.
+        Returns an empty string when there are no active scenarios to work from.
+        """
+        active = [
+            s for s in ctx.domain_knowledge.business_scenarios
+            if s.status.value != "DEPRECATED"
+        ]
+        if not active:
+            return ""
+
+        scenarios_text = "\n".join(
+            f"- {s.id}: {s.name}：{s.description}" for s in active
+        )
+        return (
+            "你是领域概念提取助手，负责从业务场景中识别并结构化领域概念。\n\n"
+            "请从以下业务场景中提取所有核心领域概念（实体、值对象、领域事件、聚合等），"
+            "以 JSON 数组格式返回。每个元素包含：\n"
+            '  - "name"：概念名称（简洁名词或名词短语）\n'
+            '  - "type"：ENTITY/VALUE_OBJECT/SERVICE/EVENT/AGGREGATE/REPOSITORY/DOMAIN_SERVICE 之一\n'
+            '  - "description"：1~2 句描述\n'
+            '  - "confidence"：置信度 0.0~1.0\n\n'
+            "重点：核心业务对象（名词）为 ENTITY；描述不变属性的概念为 VALUE_OBJECT；"
+            "表示已发生事情的动词短语（如『下单』→ OrderPlaced）为 EVENT；多个对象的一致性边界为 AGGREGATE。\n"
+            "只返回 JSON 数组，不要任何其他文字或 Markdown 标记。\n\n"
+            "---\n"
+            f"业务场景列表：\n{scenarios_text}"
+        )
+
+    def build_domain_concept_reconcile_prompt(
+        self,
+        ctx: AgentContext,
+        user_message: str,
+        ai_reply: str,
+    ) -> str:
+        """Build a focused extraction prompt for the dedicated concept reconciler.
+
+        Sent as a second lightweight AI call after each Phase 3 turn whose sole
+        job is to identify ALL domain concepts mentioned in the exchange and
+        return them as JSON.  The result is merged into
+        ``ctx.domain_knowledge.domain_concepts``.
+
+        Returns a single user-role message string.
+        """
+        existing = ctx.domain_knowledge.domain_concepts
+        if existing:
+            existing_lines = "\n".join(
+                f'  {{"name": "{c.name}", "type": "{c.concept_type.value}", '
+                f'"description": "{c.description}"}}'
+                for c in existing
+            )
+            existing_block = (
+                f"已有领域概念（仅供参考，系统会自动去重）：\n[\n{existing_lines}\n]"
+            )
+        else:
+            existing_block = "已有领域概念：[]（尚无）"
+
+        return (
+            "你是领域概念提取助手，负责从对话片段中识别并结构化领域概念。\n\n"
+            f"{existing_block}\n\n"
+            "请从下面这轮对话中提取**所有**提到、讨论过或确认过的领域概念，"
+            "以 JSON 数组格式返回。每个元素包含：\n"
+            '  - "name"：概念名称\n'
+            '  - "type"：ENTITY/VALUE_OBJECT/SERVICE/EVENT/AGGREGATE/REPOSITORY/DOMAIN_SERVICE\n'
+            '  - "description"：1~2 句描述\n'
+            '  - "confidence"：置信度 0.0~1.0\n\n'
+            "**重要**：如果 AI 回复中包含 `<concept>` XML 标签，请务必将其中的概念也包含在"
+            "返回结果中——XML 解析可能因格式问题失败，本提取器是兜底保障。\n"
+            "系统会自动对已有概念去重，无需担心重复。\n"
+            "如果本轮对话未涉及任何领域概念，返回空数组 []。\n"
+            "只返回 JSON 数组，不要任何其他文字或 Markdown 标记。\n\n"
+            "---\n"
+            f"用户说：\n{user_message}\n\n"
+            f"AI 回复：\n{ai_reply}"
+        )
+
+    def build_project_info_reconcile_prompt(
+        self,
+        ctx: AgentContext,
+        user_message: str,
+        ai_reply: str,
+    ) -> str:
+        """Build a focused extraction prompt for the dedicated Phase 1 reconciler.
+
+        Sent as a second lightweight AI call after each ICEBREAK turn whose sole
+        job is to identify the project name and domain background mentioned in
+        the exchange and return them as a JSON object.  The result is merged
+        into ``ctx.domain_knowledge`` so that the P1 phase document stays in
+        sync with what was discussed even when the conversational AI omitted
+        ``<project_info>`` tags.
+
+        Returns a single user-role message string.
+        """
+        dk = ctx.domain_knowledge
+        if dk.project_name or dk.domain_description:
+            current_block = (
+                "当前已提取信息：\n"
+                f'  project_name: "{dk.project_name or "（未填写）"}"\n'
+                f'  domain_description: "{dk.domain_description or "（未填写）"}"\n\n'
+                "只补充尚未填写的字段；已有值请保持不变，对应字段返回空字符串。"
+            )
+        else:
+            current_block = "当前已提取信息：（尚无）"
+
+        return (
+            "你是项目信息提取助手，负责从对话片段中识别项目名称和领域背景。\n\n"
+            f"{current_block}\n\n"
+            "请从下面这轮对话中提取项目名称和领域背景，以 JSON 对象格式返回：\n"
+            '  {"project_name": "项目名称", "domain_description": "领域背景描述"}\n\n'
+            "如果本轮对话未提及相关信息，或该字段已有值，对应字段返回空字符串。\n"
+            "只返回 JSON 对象，不要任何其他文字或 Markdown 标记。\n\n"
+            "---\n"
+            f"用户说：\n{user_message}\n\n"
+            f"AI 回复：\n{ai_reply}"
+        )
+
     def build_scenario_extraction_prompt(
         self,
         ctx: AgentContext,
@@ -281,19 +423,22 @@ class PromptBuilder:
                 f'  {{"id": "{s.id}", "name": "{s.name}", "description": "{s.description}"}}'
                 for s in existing
             )
-            existing_block = f"已有业务场景（请勿重复，但可补充描述）：\n[\n{existing_lines}\n]"
+            existing_block = f"已有业务场景（仅供参考，系统会自动去重）：\n[\n{existing_lines}\n]"
         else:
             existing_block = "已有业务场景：[]（尚无）"
 
         return (
             "你是业务场景提取助手，负责从对话片段中识别并结构化业务场景。\n\n"
             f"{existing_block}\n\n"
-            "请从下面这轮对话中提取**所有**提到或讨论过的业务场景（包括已有场景的补充信息），"
+            "请从下面这轮对话中提取**所有**提到、讨论过或确认过的业务场景，"
             "以 JSON 数组格式返回。每个元素包含：\n"
             '  - "id"：场景编号（已有场景保持原 id；新场景使用 S001、S002 等格式，'
             "若与已有 id 冲突则系统会自动重新分配，无需担心）\n"
             '  - "name"：简洁动宾短语（如"用户注册"、"订单审批"）\n'
             '  - "description"：1~2 句描述\n\n'
+            "**重要**：如果 AI 回复中包含 `<scenario>` XML 标签，请务必将其中的场景也包含在"
+            "返回结果中——XML 解析可能因格式问题失败，本提取器是兜底保障。\n"
+            "系统会自动对已有场景去重，无需担心重复。\n"
             "如果本轮对话未涉及任何业务场景，返回空数组 []。\n"
             "只返回 JSON 数组，不要任何其他文字或 Markdown 标记。\n\n"
             "---\n"
@@ -349,3 +494,245 @@ class PromptBuilder:
             )
         lines.append("[/TECH_STACK_BLOCK]")
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # §21 Phase-opening structured suggestion helpers
+    # ------------------------------------------------------------------
+
+    def build_intent_classification_prompt(
+        self,
+        ctx: AgentContext,
+        user_message: str,
+    ) -> str:
+        """Build a lightweight prompt for the ``UserIntentClassifier``.
+
+        The classifier is a separate, stateless AI call that reads only the
+        current user message and the active ``PhaseSuggestion`` content.  It
+        returns a JSON ``IntentClassification`` object.
+
+        Returns a single user-role message string (no history needed).
+        """
+        suggestion = ctx.phase_suggestion
+        if suggestion is None:
+            suggestion_text = "（当前阶段无开场建议）"
+        else:
+            # Render a compact text representation of pending items
+            lines = [f"当前阶段开场建议（phase={suggestion.phase.value}，状态={suggestion.status.value}）："]
+            for sr in suggestion.scenario_refinements:
+                lines.append(f"\n场景：{sr.scenario_id} {sr.scenario_name}")
+                for item in sr.items:
+                    if item.selected is None and not item.dismissed:
+                        state = "⏳"
+                    elif item.selected:
+                        state = "✅"
+                    else:
+                        state = "❌"
+                    lines.append(
+                        f"  [{item.index}] {state} {item.question} | 备选：{' / '.join(item.options)}"
+                        + (f" | 已选：{item.selected}" if item.selected else "")
+                    )
+            suggestion_text = "\n".join(lines) if len(lines) > 1 else "（建议模板为空）"
+
+        return (
+            "你是意图分类助手，负责将用户消息分类为以下意图之一：\n\n"
+            "  MAKE_SELECTION     — 用户选择了某个备选方案\n"
+            "  REQUEST_MORE       — 用户要求更多建议或问题\n"
+            "  REQUEST_REFINE     — 用户要求对某条问题进一步细化\n"
+            "  REJECT_SUGGESTION  — 用户拒绝/跳过某条建议\n"
+            "  PROVIDE_FEEDBACK   — 用户提供了开放性反馈（与建议相关但不符合上述类型）\n"
+            "  OUT_OF_SCOPE       — 用户请求与当前建议内容完全无关\n\n"
+            "返回 JSON 对象，字段说明：\n"
+            '  "intent"           : 以上意图之一（必填）\n'
+            '  "target_index"     : 涉及哪个序号的建议条目（整数，无则 null）\n'
+            '  "selected_option"  : MAKE_SELECTION 时提取的选择文字（无则 null）\n'
+            '  "raw_feedback"     : PROVIDE_FEEDBACK 时的原文摘要（无则 null）\n'
+            '  "out_of_scope_hint": OUT_OF_SCOPE 时对用户意图的简短描述（无则 null）\n\n'
+            "只返回 JSON 对象，不要任何其他文字或 Markdown 标记。\n\n"
+            "---\n"
+            f"{suggestion_text}\n\n"
+            "---\n"
+            f"用户消息：\n{user_message}"
+        )
+
+    def build_phase_opening_suggestion_prompt(self, ctx: AgentContext) -> str:
+        """Build a prompt that generates the phase-opening structured suggestion JSON.
+
+        Called once at the start of each phase (P2–P5) by
+        ``AgentCore._generate_phase_opening_suggestion()``.  The AI returns
+        a JSON object matching the ``PhaseSuggestion`` schema for the target
+        phase.
+
+        Returns an empty string when the phase does not use this mechanism
+        (e.g. ``ICEBREAK``).
+        """
+        phase = ctx.current_phase
+        dk = ctx.domain_knowledge
+
+        if phase == Phase.REQUIREMENT:
+            # P2: generate per-scenario refinement questions
+            active = [s for s in dk.business_scenarios if s.status.value != "DEPRECATED"]
+            if not active:
+                return ""
+            scenarios_text = "\n".join(
+                f"- {s.id}（{s.name}）：{s.description}" for s in active
+            )
+            return (
+                "你是 DDD 需求细化助手。请根据以下业务场景，为每个场景生成 3~5 个待细化问题，"
+                "每个问题提供 2~4 个备选方案供用户选择。\n\n"
+                "返回 JSON 数组，格式如下（scenario_refinements 字段）：\n"
+                '{\n  "scenario_refinements": [\n'
+                '    {\n      "scenario_id": "S001",\n      "scenario_name": "场景名称",\n'
+                '      "items": [\n'
+                '        {"index": 1, "question": "细化问题", "options": ["方案A", "方案B"]},\n'
+                '        ...\n      ]\n    },\n    ...\n  ]\n}\n\n'
+                "注意：\n"
+                '- question 应为具体的业务决策问题（如"定时发布是否需要支持设置日期和时间？"）\n'
+                '- options 应为 2~4 个具体的备选答案（如 ["是", "否"] 或 ["30秒", "1分钟", "手动保存"]）\n'
+                "- index 从 1 开始，跨场景连续编号（S001 第1~4条，S002 第5~8条，依此类推）\n"
+                "- 只返回 JSON 对象，不要任何其他文字或 Markdown 标记。\n\n"
+                "---\n"
+                f"业务场景列表：\n{scenarios_text}"
+            )
+
+        if phase == Phase.DOMAIN_EXPLORE:
+            # P3: suggest bounded-context groupings
+            concepts = dk.domain_concepts
+            if not concepts:
+                return ""
+            concepts_text = "\n".join(
+                f"- {c.name}（{c.concept_type.value}）：{c.description}" for c in concepts
+            )
+            return (
+                "你是 DDD 限界上下文划分助手。请根据以下领域概念，建议合理的限界上下文分组方案。\n\n"
+                "返回 JSON 对象，格式如下（context_groupings 字段）：\n"
+                '{\n  "context_groupings": [\n'
+                '    {\n      "index": 1,\n      "context_name": "内容管理上下文",\n'
+                '      "concepts": ["文章", "草稿", "分类"],\n'
+                '      "rationale": "均属于内容生命周期管理",\n'
+                '      "alternatives": ["合并到用户上下文", "拆分为 ArticleContext + MediaContext"]\n'
+                '    },\n    ...\n  ]\n}\n\n'
+                "- index 从 1 开始连续编号\n"
+                "- alternatives 提供 1~3 个备选分组方案\n"
+                "- 只返回 JSON 对象，不要任何其他文字或 Markdown 标记。\n\n"
+                "---\n"
+                f"领域概念列表：\n{concepts_text}"
+            )
+
+        if phase == Phase.MODEL_DESIGN:
+            # P4: suggest aggregate/entity/value-object design per context
+            bounded = dk.bounded_contexts
+            concepts = dk.domain_concepts
+            if not concepts:
+                return ""
+            concepts_text = "\n".join(
+                f"- {c.name}（{c.concept_type.value}）：{c.description}" for c in concepts
+            )
+            contexts_text = (
+                "\n".join(f"- {bc.name}：包含概念 {', '.join(bc.concepts[:5])}" for bc in bounded)
+                if bounded
+                else "（尚未划分限界上下文）"
+            )
+            return (
+                "你是 DDD 模型设计助手。请根据以下领域概念和限界上下文，"
+                "为每个上下文建议聚合根/实体/值对象划分方案。\n\n"
+                "返回 JSON 对象，格式如下（model_designs 字段）：\n"
+                '{\n  "model_designs": [\n'
+                '    {\n      "index": 1,\n      "context_name": "内容管理上下文",\n'
+                '      "aggregate_root": "Article",\n'
+                '      "entities": ["Draft", "Category"],\n'
+                '      "value_objects": ["Slug", "PublishTime"],\n'
+                '      "rationale": "Article 是内容生命周期的核心聚合",\n'
+                '      "alternatives": ["将 Draft 设为 Article 的值对象", "将 Category 提升为独立聚合根"]\n'
+                '    },\n    ...\n  ]\n}\n\n'
+                "- 只返回 JSON 对象，不要任何其他文字或 Markdown 标记。\n\n"
+                "---\n"
+                f"限界上下文：\n{contexts_text}\n\n"
+                f"领域概念：\n{concepts_text}"
+            )
+
+        if phase == Phase.REVIEW_REFINE:
+            # P5: review the current domain model and suggest revision points
+            concepts = dk.domain_concepts
+            bounded = dk.bounded_contexts
+            if not concepts:
+                return ""
+            summary = f"领域概念（{len(concepts)} 个）：" + "、".join(c.name for c in concepts[:10])
+            contexts_summary = (
+                "限界上下文：" + "、".join(bc.name for bc in bounded[:5])
+                if bounded else "（尚未划分限界上下文）"
+            )
+            return (
+                "你是 DDD 模型审阅助手。请对以下领域模型做一致性检查，"
+                "列出潜在问题和建议的修订点。\n\n"
+                "返回 JSON 对象，格式如下（review_items 字段）：\n"
+                '{\n  "review_items": [\n'
+                '    {\n      "index": 1,\n      "severity": "高|中|低",\n'
+                '      "issue_type": "一致性问题|边界问题|命名问题|遗漏项",\n'
+                '      "description": "问题描述",\n'
+                '      "suggestion": "修订建议",\n'
+                '      "options": ["接受建议", "标记为无需处理", "自定义修订"]\n'
+                '    },\n    ...\n  ]\n}\n\n'
+                "- 按 severity 降序排列（高→中→低）\n"
+                "- 只返回 JSON 对象，不要任何其他文字或 Markdown 标记。\n\n"
+                "---\n"
+                f"{summary}\n{contexts_summary}"
+            )
+
+        return ""  # ICEBREAK and unknown phases: no suggestion
+
+    def build_structured_reply_instruction(
+        self,
+        ctx: AgentContext,
+        applied_changes: List[str],
+        pending_items_text: str,
+    ) -> str:
+        """Build the three-part structured reply format instruction.
+
+        Injected into the main conversational AI's system prompt when
+        ``PhaseDocumentEditor`` executed at least one write this turn.
+
+        ``applied_changes`` is a list of human-readable change descriptions
+        (one per write operation performed this turn).
+        ``pending_items_text`` is a pre-rendered Markdown block of the items
+        still awaiting user confirmation; pass an empty string if none remain.
+
+        Degrades gracefully:
+        - No applied_changes → omit 【已确定内容】 block.
+        - No pending_items_text → omit 【待确认内容】 block.
+        - Both empty → the instruction is not injected at all (caller guards
+          against calling this with both empty).
+        """
+        sections: List[str] = []
+
+        if applied_changes:
+            confirmed_lines = "\n".join(f"• ✅ {c}" for c in applied_changes)
+            sections.append(
+                "【已确定内容】\n"
+                "以下条目已在本轮写入文档：\n"
+                f"{confirmed_lines}"
+            )
+
+        if pending_items_text:
+            sections.append(
+                "【待确认内容】\n"
+                "以下建议条目仍待用户选择或说明：\n"
+                f"{pending_items_text}"
+            )
+
+        if not sections:
+            return ""
+
+        sections.append(
+            "【其他回答与引导】\n"
+            "回答用户的其他问题（如有），并说明当前阶段进度，引导用户继续。"
+        )
+
+        body = "\n\n─────────────────────────────────────────\n\n".join(sections)
+        return (
+            "[STRUCTURED_REPLY_FORMAT]\n"
+            "请按以下三段式结构输出本轮回复：\n\n"
+            "─────────────────────────────────────────\n\n"
+            + body
+            + "\n\n─────────────────────────────────────────\n"
+            "[/STRUCTURED_REPLY_FORMAT]"
+        )

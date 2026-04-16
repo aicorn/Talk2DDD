@@ -14,11 +14,14 @@ from app.agent.context import (
     Phase,
     PHASE_LABELS,
     PHASE_PROGRESS,
+    PhaseSuggestion,
     TechStackPreferences,
+    UserIntent,
 )
 from app.agent.context_manager import ContextManager
 from app.agent.knowledge_extractor import KnowledgeExtractor
 from app.agent.memory_manager import MemoryManager
+from app.agent.phase_document_editor import OutOfScopeHandler, PhaseDocumentEditor
 from app.agent.phase_document_renderer import PhaseDocumentRenderer
 from app.agent.phase_engine import PhaseEngine
 from app.agent.prompt_builder import PromptBuilder
@@ -120,6 +123,8 @@ class AgentCore:
         self._prompt_builder = PromptBuilder()
         self._knowledge_extractor = KnowledgeExtractor()
         self._doc_renderer = PhaseDocumentRenderer()
+        self._phase_doc_editor = PhaseDocumentEditor()
+        self._out_of_scope_handler = OutOfScopeHandler()
 
     async def chat(
         self,
@@ -145,6 +150,40 @@ class AgentCore:
         summary_block = self._memory_manager.get_summary_block(ctx)
         system_prompt = self._prompt_builder.build(ctx, memory_summary_block=summary_block)
 
+        # 3b. If a phase-opening suggestion is active (P2–P5), classify the
+        #     user's intent and apply any document operations.  The results
+        #     may augment the system prompt with an OUT_OF_SCOPE reminder or
+        #     a structured reply format instruction.
+        applied_changes_text = ""
+        if ctx.phase_suggestion is not None and ctx.current_phase != Phase.ICEBREAK:
+            applied_changes_text, out_of_scope_reminder = (
+                await self._classify_and_apply_intent(ctx, message, provider)
+            )
+            if out_of_scope_reminder:
+                system_prompt = system_prompt + "\n\n---\n\n" + out_of_scope_reminder
+            elif applied_changes_text:
+                # Build pending items text from suggestion
+                pending_lines: List[str] = []
+                suggestion = ctx.phase_suggestion
+                if suggestion is not None:
+                    for sr in suggestion.scenario_refinements:
+                        for item in sr.items:
+                            if item.selected is None and not item.dismissed:
+                                opts = " / ".join(item.options)
+                                pending_lines.append(
+                                    f"[{item.index}] {item.question}　备选：{opts}"
+                                )
+                pending_items_text = "\n".join(pending_lines)
+                structured_instruction = (
+                    self._prompt_builder.build_structured_reply_instruction(
+                        ctx,
+                        applied_changes=applied_changes_text.splitlines(),
+                        pending_items_text=pending_items_text,
+                    )
+                )
+                if structured_instruction:
+                    system_prompt = system_prompt + "\n\n---\n\n" + structured_instruction
+
         # 4. Call AI – pass Layer-1 immediate history + current message
         history = await self._memory_manager.get_messages_for_ai(ctx, db)
         messages = [{"role": "system", "content": system_prompt}]
@@ -157,11 +196,34 @@ class AgentCore:
         prev_ts_confirmed = ctx.tech_stack_preferences.confirmed
         self._knowledge_extractor.extract(ai_reply, ctx)
 
-        # 5b. In the REQUIREMENT phase, run a dedicated scenario-extraction pass to
+        # 5b. In the ICEBREAK phase, run a dedicated project-info extraction pass to
+        #     ensure the project name and domain background discussed in the
+        #     conversation are captured even when the conversational AI omitted
+        #     <project_info> tags.
+        if ctx.current_phase == Phase.ICEBREAK:
+            await self._reconcile_project_info(
+                ctx=ctx,
+                user_message=message,
+                ai_reply=ai_reply,
+                provider=provider,
+            )
+
+        # 5c. In the REQUIREMENT phase, run a dedicated scenario-extraction pass to
         #     ensure all business items discussed in the conversation are captured in
         #     the context even when the conversational AI omitted <scenario> tags.
         if ctx.current_phase == Phase.REQUIREMENT:
             await self._reconcile_scenarios(
+                ctx=ctx,
+                user_message=message,
+                ai_reply=ai_reply,
+                provider=provider,
+            )
+
+        # 5d. In the DOMAIN_EXPLORE phase, run a dedicated concept-extraction pass to
+        #     ensure all domain concepts discussed in the conversation are captured in
+        #     the context even when the conversational AI omitted <concept> tags.
+        if ctx.current_phase == Phase.DOMAIN_EXPLORE:
+            await self._reconcile_domain_concepts(
                 ctx=ctx,
                 user_message=message,
                 ai_reply=ai_reply,
@@ -258,12 +320,58 @@ class AgentCore:
             phase_switch_trigger=True,
         )
 
+        # 4b. Generate phase-opening structured suggestion (non-fatal).
+        #     Stored in ctx.phase_suggestion before the main AI call so the
+        #     system prompt's context block can reference it if needed.
+        if ctx.current_phase != Phase.ICEBREAK and direction == "next":
+            await self._generate_phase_opening_suggestion(ctx, provider=provider)
+
         # 5. Retrieve immediate message history (Layer 1) and call AI
         history = await self._memory_manager.get_messages_for_ai(ctx, db)
-        trigger_msg = _PHASE_SWITCH_TRIGGERS.get(
-            ctx.current_phase,
-            f"[系统] 用户切换到阶段 {ctx.current_phase.value}。",
-        )
+
+        # Build the phase-switch trigger message.
+        #
+        # P3 (DOMAIN_EXPLORE): embed the rendered initial concept document generated
+        #   from Phase 2 scenarios so the AI presents it immediately.
+        # P2 / P4 / P5: if a phase-opening suggestion was successfully generated,
+        #   embed the rendered suggestion table so the AI presents it as a
+        #   structured plan rather than reverting to one-by-one questioning.
+        # All other cases: fall back to the generic trigger strings.
+        if ctx.current_phase == Phase.DOMAIN_EXPLORE:
+            await self._generate_initial_domain_concepts(ctx, provider=provider)
+            initial_doc = self._doc_renderer.render(ctx)
+            trigger_msg = (
+                "[系统] 用户手动进入「领域探索」阶段（P3）。\n"
+                "系统已根据上一阶段收集的业务场景，自动提炼了初版「领域概念词汇表」，内容如下：\n\n"
+                f"{initial_doc}\n\n"
+                "请向用户展示这份初版领域概念词汇表，说明这是根据业务场景自动生成的初版，"
+                "邀请用户提出修改意见，并引导进入下一个领域探索问题。"
+            )
+        elif ctx.phase_suggestion is not None and ctx.current_phase in (
+            Phase.REQUIREMENT,
+            Phase.MODEL_DESIGN,
+            Phase.REVIEW_REFINE,
+        ):
+            suggestion_block = self._render_opening_suggestion_block(ctx.phase_suggestion)
+            _phase_labels = {
+                Phase.REQUIREMENT: ("需求收集", "P2", "业务场景细化"),
+                Phase.MODEL_DESIGN: ("模型设计", "P4", "聚合模型设计"),
+                Phase.REVIEW_REFINE: ("审阅完善", "P5", "文档审阅修订"),
+            }
+            label, pnum, goal = _phase_labels[ctx.current_phase]
+            trigger_msg = (
+                f"[系统] 用户手动进入「{label}」阶段（{pnum}）。\n"
+                f"系统已根据已收集的资料，自动生成了本阶段的{goal}建议如下：\n\n"
+                f"{suggestion_block}\n\n"
+                "请直接向用户展示上面的建议表格，简短说明本阶段目标，"
+                "并引导用户针对表中各项作出选择或提出细化意见。"
+                "不要一条一条逐一询问，而是一次性呈现完整建议。"
+            )
+        else:
+            trigger_msg = _PHASE_SWITCH_TRIGGERS.get(
+                ctx.current_phase,
+                f"[系统] 用户切换到阶段 {ctx.current_phase.value}。",
+            )
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(history)
         messages.append({"role": "user", "content": trigger_msg})
@@ -319,6 +427,71 @@ class AgentCore:
             phase_changed=True,
         )
 
+    async def _reconcile_project_info(
+        self,
+        ctx: AgentContext,
+        user_message: str,
+        ai_reply: str,
+        provider: Optional[str] = None,
+    ) -> None:
+        """Run a dedicated extractor AI call to reconcile Phase 1 project info.
+
+        This is the "Extractor Role" in the dual-role pattern for Phase 1
+        (ICEBREAK).  After the main conversational AI response has been
+        processed, a second lightweight AI call is made whose only job is to
+        extract the project name and domain background from the exchange and
+        return them as a JSON object.  The result is merged into
+        ``ctx.domain_knowledge`` so the P1 phase document is always in sync
+        with what was discussed even when the conversational AI omitted
+        ``<project_info>`` tags.
+
+        This call is non-fatal: any exception is silently logged and the
+        regular flow continues uninterrupted.
+        """
+        import logging as _logging
+
+        _log = _logging.getLogger(__name__)
+
+        # Skip if both fields are already populated — nothing more to extract.
+        if (
+            ctx.domain_knowledge.project_name
+            and ctx.domain_knowledge.domain_description
+        ):
+            return
+
+        try:
+            reconcile_prompt = self._prompt_builder.build_project_info_reconcile_prompt(
+                ctx, user_message, ai_reply
+            )
+            messages = [{"role": "user", "content": reconcile_prompt}]
+            json_reply = await chat_completion(messages=messages, provider=provider)
+            updated = self._knowledge_extractor.merge_project_info_from_json(
+                json_reply, ctx
+            )
+            if updated:
+                _log.info(
+                    "Project info reconciler updated context for session %s "
+                    "(turn %d): project_name=%r domain_description=%r",
+                    ctx.session_id,
+                    ctx.turn_count,
+                    ctx.domain_knowledge.project_name,
+                    ctx.domain_knowledge.domain_description,
+                )
+            else:
+                _log.warning(
+                    "Project info reconciler ran but extracted nothing for "
+                    "session %s (turn %d). Check if project name or domain "
+                    "background was mentioned but not captured.",
+                    ctx.session_id,
+                    ctx.turn_count,
+                )
+        except Exception:
+            _log.debug(
+                "Project info reconciliation failed for session %s (non-fatal)",
+                ctx.session_id,
+                exc_info=True,
+            )
+
     async def _reconcile_scenarios(
         self,
         ctx: AgentContext,
@@ -340,19 +513,349 @@ class AgentCore:
         """
         import logging as _logging
 
+        _log = _logging.getLogger(__name__)
+        count_before = len(ctx.domain_knowledge.business_scenarios)
+
         try:
             extraction_prompt = self._prompt_builder.build_scenario_extraction_prompt(
                 ctx, user_message, ai_reply
             )
             messages = [{"role": "user", "content": extraction_prompt}]
             json_reply = await chat_completion(messages=messages, provider=provider)
-            self._knowledge_extractor.merge_scenarios_from_json(json_reply, ctx)
+            added = int(
+                self._knowledge_extractor.merge_scenarios_from_json(json_reply, ctx)
+                or 0
+            )
+            if added > 0:
+                _log.info(
+                    "Scenario reconciler added %d new scenario(s) for session %s "
+                    "(turn %d, total=%d)",
+                    added,
+                    ctx.session_id,
+                    ctx.turn_count,
+                    len(ctx.domain_knowledge.business_scenarios),
+                )
+            else:
+                _log.warning(
+                    "Scenario reconciler ran but added 0 new scenarios for session %s "
+                    "(turn %d, existing=%d). Check if a scenario was confirmed in the "
+                    "conversation but not captured.",
+                    ctx.session_id,
+                    ctx.turn_count,
+                    count_before,
+                )
         except Exception:
-            _logging.getLogger(__name__).debug(
+            _log.debug(
                 "Scenario reconciliation failed for session %s (non-fatal)",
                 ctx.session_id,
                 exc_info=True,
             )
+
+    async def _generate_initial_domain_concepts(
+        self,
+        ctx: AgentContext,
+        provider: Optional[str] = None,
+    ) -> None:
+        """Extract initial domain concepts from Phase 2 business scenarios.
+
+        This is called once when the session enters DOMAIN_EXPLORE so that the
+        opening phase document already contains a seed set of concepts derived
+        from all collected business scenarios.  The result is merged into
+        ``ctx.domain_knowledge.domain_concepts``.
+
+        This call is non-fatal: any exception is silently logged and the phase
+        switch continues uninterrupted (the document will simply be empty).
+        """
+        import logging as _logging
+
+        try:
+            extraction_prompt = (
+                self._prompt_builder.build_initial_domain_concept_extraction_prompt(ctx)
+            )
+            if not extraction_prompt:
+                return
+            messages = [{"role": "user", "content": extraction_prompt}]
+            json_reply = await chat_completion(messages=messages, provider=provider)
+            self._knowledge_extractor.merge_concepts_from_json(json_reply, ctx)
+        except Exception:
+            _logging.getLogger(__name__).debug(
+                "Initial domain concept extraction failed for session %s (non-fatal)",
+                ctx.session_id,
+                exc_info=True,
+            )
+
+    async def _reconcile_domain_concepts(
+        self,
+        ctx: AgentContext,
+        user_message: str,
+        ai_reply: str,
+        provider: Optional[str] = None,
+    ) -> None:
+        """Run a dedicated extractor AI call to reconcile domain concepts.
+
+        This is the "Extractor Role" in the dual-role pattern for Phase 3.
+        After the main conversational AI response has been processed, a second
+        lightweight AI call is made whose only job is to identify ALL domain
+        concepts mentioned in the current exchange and return them as JSON.
+        The result is merged into ``ctx.domain_knowledge.domain_concepts``
+        so the phase document is always in sync with what was discussed.
+
+        This call is non-fatal: any exception is silently logged and the
+        regular flow continues uninterrupted.
+        """
+        import logging as _logging
+
+        _log = _logging.getLogger(__name__)
+        count_before = len(ctx.domain_knowledge.domain_concepts)
+
+        try:
+            reconcile_prompt = self._prompt_builder.build_domain_concept_reconcile_prompt(
+                ctx, user_message, ai_reply
+            )
+            messages = [{"role": "user", "content": reconcile_prompt}]
+            json_reply = await chat_completion(messages=messages, provider=provider)
+            added = int(
+                self._knowledge_extractor.merge_concepts_from_json(json_reply, ctx)
+                or 0
+            )
+            if added > 0:
+                _log.info(
+                    "Concept reconciler added %d new concept(s) for session %s "
+                    "(turn %d, total=%d)",
+                    added,
+                    ctx.session_id,
+                    ctx.turn_count,
+                    len(ctx.domain_knowledge.domain_concepts),
+                )
+            else:
+                _log.warning(
+                    "Concept reconciler ran but added 0 new concepts for session %s "
+                    "(turn %d, existing=%d). Check if a concept was confirmed in the "
+                    "conversation but not captured.",
+                    ctx.session_id,
+                    ctx.turn_count,
+                    count_before,
+                )
+        except Exception:
+            _log.debug(
+                "Domain concept reconciliation failed for session %s (non-fatal)",
+                ctx.session_id,
+                exc_info=True,
+            )
+
+    async def _generate_phase_opening_suggestion(
+        self,
+        ctx: AgentContext,
+        provider: Optional[str] = None,
+    ) -> None:
+        """Generate the phase-opening structured suggestion on ``switch_phase()``.
+
+        Calls the AI once to produce a ``PhaseSuggestion`` JSON object for the
+        current phase, parses it, and stores it in ``ctx.phase_suggestion``.
+
+        Non-fatal: any failure is logged at DEBUG and the phase switch
+        continues without a suggestion.  P1 (ICEBREAK) is skipped.
+
+        Design reference: §21.6 of ai-agent-design.md.
+        """
+        import json
+        import logging as _logging
+
+        _log = _logging.getLogger(__name__)
+
+        if ctx.current_phase == Phase.ICEBREAK:
+            return  # P1 has no phase-opening suggestion
+
+        prompt = self._prompt_builder.build_phase_opening_suggestion_prompt(ctx)
+        if not prompt:
+            return
+
+        try:
+            messages = [{"role": "user", "content": prompt}]
+            json_reply = await chat_completion(messages=messages, provider=provider)
+
+            # Strip optional markdown fencing
+            raw = self._strip_json_fencing(json_reply)
+
+            data = json.loads(raw)
+            now = datetime.now(timezone.utc)
+
+            suggestion = PhaseSuggestion(phase=ctx.current_phase, generated_at=now)
+
+            if "scenario_refinements" in data:
+                from app.agent.context import RefinementItem, ScenarioRefinementSuggestion
+
+                for sr_raw in data["scenario_refinements"]:
+                    items = [
+                        RefinementItem(
+                            index=item.get("index", i + 1),
+                            question=item.get("question", ""),
+                            options=item.get("options", []),
+                        )
+                        for i, item in enumerate(sr_raw.get("items", []))
+                    ]
+                    suggestion.scenario_refinements.append(
+                        ScenarioRefinementSuggestion(
+                            scenario_id=sr_raw.get("scenario_id", ""),
+                            scenario_name=sr_raw.get("scenario_name", ""),
+                            items=items,
+                        )
+                    )
+
+            if "context_groupings" in data:
+                from app.agent.context import ContextSuggestionItem
+
+                for i, cg in enumerate(data["context_groupings"], start=1):
+                    suggestion.context_groupings.append(
+                        ContextSuggestionItem(
+                            index=cg.get("index", i),
+                            context_name=cg.get("context_name", ""),
+                            concepts=cg.get("concepts", []),
+                            rationale=cg.get("rationale", ""),
+                            alternatives=cg.get("alternatives", []),
+                        )
+                    )
+
+            if "model_designs" in data:
+                from app.agent.context import ModelDesignItem
+
+                for i, md in enumerate(data["model_designs"], start=1):
+                    suggestion.model_designs.append(
+                        ModelDesignItem(
+                            index=md.get("index", i),
+                            context_name=md.get("context_name", ""),
+                            aggregate_root=md.get("aggregate_root", ""),
+                            entities=md.get("entities", []),
+                            value_objects=md.get("value_objects", []),
+                            rationale=md.get("rationale", ""),
+                            alternatives=md.get("alternatives", []),
+                        )
+                    )
+
+            if "review_items" in data:
+                from app.agent.context import ReviewItem
+
+                for i, ri in enumerate(data["review_items"], start=1):
+                    suggestion.review_items.append(
+                        ReviewItem(
+                            index=ri.get("index", i),
+                            severity=ri.get("severity", "中"),
+                            issue_type=ri.get("issue_type", ""),
+                            description=ri.get("description", ""),
+                            suggestion=ri.get("suggestion", ""),
+                            options=ri.get("options", ["接受建议", "标记为无需处理", "自定义修订"]),
+                        )
+                    )
+
+            ctx.phase_suggestion = suggestion
+            _log.info(
+                "Phase-opening suggestion generated for session %s phase=%s "
+                "(scenarios=%d contexts=%d models=%d reviews=%d)",
+                ctx.session_id,
+                ctx.current_phase.value,
+                len(suggestion.scenario_refinements),
+                len(suggestion.context_groupings),
+                len(suggestion.model_designs),
+                len(suggestion.review_items),
+            )
+        except Exception:
+            _log.debug(
+                "Phase-opening suggestion generation failed for session %s (non-fatal)",
+                ctx.session_id,
+                exc_info=True,
+            )
+
+    async def _classify_and_apply_intent(
+        self,
+        ctx: AgentContext,
+        user_message: str,
+        provider: Optional[str] = None,
+    ) -> tuple[str, str]:
+        """Classify the user's intent and apply the corresponding document operation.
+
+        Returns a tuple of:
+        - ``applied_changes_text``: human-readable list of write operations joined
+          by newlines (empty string if nothing was written).
+        - ``out_of_scope_reminder``: system-prompt reminder text to inject when
+          intent is ``OUT_OF_SCOPE`` (empty string otherwise).
+
+        Non-fatal: on any failure the intent degrades to ``PROVIDE_FEEDBACK``
+        (no document writes, no reminder injected), and the method returns
+        two empty strings.
+
+        Design reference: §21.7 of ai-agent-design.md.
+        """
+        import json
+        import logging as _logging
+
+        _log = _logging.getLogger(__name__)
+
+        if ctx.phase_suggestion is None or ctx.current_phase == Phase.ICEBREAK:
+            return "", ""
+
+        try:
+            prompt = self._prompt_builder.build_intent_classification_prompt(
+                ctx, user_message
+            )
+            messages = [{"role": "user", "content": prompt}]
+            json_reply = await chat_completion(messages=messages, provider=provider)
+
+            raw = self._strip_json_fencing(json_reply)
+
+            from app.agent.context import IntentClassification
+
+            data = json.loads(raw)
+            classification = IntentClassification(**data)
+            intent = classification.intent
+
+            _log.info(
+                "UserIntentClassifier: session=%s turn=%d intent=%s target=%s",
+                ctx.session_id,
+                ctx.turn_count,
+                intent.value,
+                classification.target_index,
+            )
+
+        except Exception:
+            _log.debug(
+                "Intent classification failed for session %s (non-fatal, defaulting to PROVIDE_FEEDBACK)",
+                ctx.session_id,
+                exc_info=True,
+            )
+            return "", ""
+
+        applied_changes: List[str] = []
+
+        if intent == UserIntent.MAKE_SELECTION and classification.target_index is not None:
+            change = self._phase_doc_editor.apply_selection(
+                ctx,
+                classification.target_index,
+                classification.selected_option or "",
+                note=classification.raw_feedback,
+            )
+            if change:
+                applied_changes.append(change)
+
+        elif intent == UserIntent.REJECT_SUGGESTION and classification.target_index is not None:
+            change = self._phase_doc_editor.dismiss_item(
+                ctx,
+                classification.target_index,
+                reason=classification.raw_feedback,
+            )
+            if change:
+                applied_changes.append(change)
+
+        elif intent == UserIntent.OUT_OF_SCOPE:
+            reminder = self._out_of_scope_handler.build_reminder(
+                ctx,
+                out_of_scope_hint=classification.out_of_scope_hint,
+            )
+            return "", reminder
+
+        # REQUEST_MORE, REQUEST_REFINE, and PROVIDE_FEEDBACK: no writes here;
+        # the conversational AI handles them naturally.
+
+        return "\n".join(applied_changes), ""
 
     async def _save_phase_document_to_project(
         self,
@@ -459,6 +962,91 @@ class AgentCore:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _render_opening_suggestion_block(suggestion: "PhaseSuggestion") -> str:
+        """Render a ``PhaseSuggestion`` as a markdown block for the trigger message.
+
+        The rendered string is embedded in the system trigger so the conversational
+        AI presents a structured table to the user on phase entry instead of falling
+        back to the old one-by-one questioning approach.
+        """
+        from app.agent.context import Phase as _Phase
+
+        lines: list[str] = []
+
+        # ── P2: scenario refinement tables ────────────────────────────────
+        if suggestion.scenario_refinements:
+            lines.append("## 各场景待细化点\n")
+            for sr in suggestion.scenario_refinements:
+                lines.append(f"### {sr.scenario_id} - {sr.scenario_name}\n")
+                lines.append("| 序号 | 细化问题 | 备选方案 |")
+                lines.append("|------|---------|---------|")
+                for item in sr.items:
+                    options_str = " / ".join(item.options) if item.options else "—"
+                    lines.append(f"| {item.index} | {item.question} | {options_str} |")
+                lines.append("")
+
+        # ── P3: context groupings ─────────────────────────────────────────
+        if suggestion.context_groupings:
+            lines.append("## 建议的限界上下文划分方案\n")
+            lines.append("| 序号 | 限界上下文 | 包含概念 | 划分理由 | 备选方案 |")
+            lines.append("|------|-----------|---------|---------|---------|")
+            for item in suggestion.context_groupings:
+                concepts_str = "、".join(item.concepts)
+                alternatives_str = " / ".join(item.alternatives) if item.alternatives else "—"
+                lines.append(
+                    f"| {item.index} | {item.context_name} | {concepts_str} | {item.rationale} | {alternatives_str} |"
+                )
+            lines.append("")
+
+        # ── P4: model design items ────────────────────────────────────────
+        if suggestion.model_designs:
+            lines.append("## 聚合模型设计建议\n")
+            for item in suggestion.model_designs:
+                lines.append(f"### {item.index}. {item.context_name}\n")
+                lines.append(f"- **聚合根**：{item.aggregate_root}")
+                if item.entities:
+                    lines.append(f"- **实体**：{'、'.join(item.entities)}")
+                if item.value_objects:
+                    lines.append(f"- **值对象**：{'、'.join(item.value_objects)}")
+                lines.append(f"- **理由**：{item.rationale}")
+                if item.alternatives:
+                    lines.append(f"- **备选方案**：{'；'.join(item.alternatives)}")
+                lines.append("")
+
+        # ── P5: review items ──────────────────────────────────────────────
+        if suggestion.review_items:
+            lines.append("## 审阅修订建议\n")
+            lines.append("| 序号 | 严重程度 | 问题类型 | 问题描述 | 修订建议 |")
+            lines.append("|------|---------|---------|---------|---------|")
+            for item in suggestion.review_items:
+                lines.append(
+                    f"| {item.index} | {item.severity} | {item.issue_type} | {item.description} | {item.suggestion} |"
+                )
+            lines.append("")
+
+        return "\n".join(lines).strip()
+
+    @staticmethod
+    def _strip_json_fencing(raw: str) -> str:
+        """Remove optional Markdown code-fence wrappers from an AI JSON reply.
+
+        Handles::
+
+            ```json
+            ...
+            ```
+
+        and plain JSON (returned as-is).
+        """
+        s = raw.strip()
+        if s.startswith("```"):
+            s = s.split("```", 2)[1]
+            if s.startswith("json"):
+                s = s[4:]
+            s = s.rsplit("```", 1)[0].strip()
+        return s
 
     def _format_concepts(self, ctx: AgentContext) -> List[Dict[str, Any]]:
         return [

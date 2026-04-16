@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import List, Optional
 from xml.etree import ElementTree as ET
@@ -18,6 +19,8 @@ from app.agent.context import (
     TechChoice,
     TechProficiency,
 )
+
+_log = logging.getLogger(__name__)
 
 
 def _extract_raw_tags(text: str, tag: str) -> List[str]:
@@ -65,11 +68,30 @@ class KnowledgeExtractor:
         for raw in _extract_raw_tags(text, "concept"):
             elem = _safe_parse_xml(raw)
             if elem is None:
-                continue
-            name = (elem.get("name") or "").strip()
-            type_str = (elem.get("type") or "ENTITY").upper()
-            confidence_str = elem.get("confidence") or "0.8"
-            description = (elem.text or "").strip()
+                # XML parse failed — attempt regex fallback to salvage name/type/text
+                _log.debug(
+                    "XML parse failed for <concept> tag; trying regex fallback. "
+                    "raw (truncated): %.120s",
+                    raw,
+                )
+                name_m = re.search(r'name=["\']([^"\']+)["\']', raw, re.IGNORECASE)
+                if not name_m:
+                    continue
+                type_m = re.search(r'type=["\']([^"\']+)["\']', raw, re.IGNORECASE)
+                conf_m = re.search(r'confidence=["\']([^"\']+)["\']', raw, re.IGNORECASE)
+                text_m = re.search(
+                    r"<concept[^>]*>(.*?)</concept>", raw, re.DOTALL | re.IGNORECASE
+                )
+                name = name_m.group(1).strip()
+                type_str = type_m.group(1).strip().upper() if type_m else "ENTITY"
+                confidence_str = conf_m.group(1).strip() if conf_m else "0.8"
+                description = text_m.group(1).strip() if text_m else ""
+            else:
+                name = (elem.get("name") or "").strip()
+                type_str = (elem.get("type") or "ENTITY").upper()
+                confidence_str = elem.get("confidence") or "0.8"
+                description = (elem.text or "").strip()
+
             if not name:
                 continue
             try:
@@ -102,15 +124,40 @@ class KnowledgeExtractor:
                         confidence=confidence,
                     )
                 )
+                _log.debug(
+                    "Extracted new concept: name=%s type=%s (session=%s)",
+                    name,
+                    concept_type.value,
+                    ctx.session_id,
+                )
 
     def _extract_scenarios(self, text: str, ctx: AgentContext) -> None:
         for raw in _extract_raw_tags(text, "scenario"):
             elem = _safe_parse_xml(raw)
             if elem is None:
-                continue
-            scenario_id = (elem.get("id") or "").strip()
-            name = (elem.get("name") or "").strip()
-            description = (elem.text or "").strip()
+                # XML parse failed — attempt regex fallback to salvage id/name/text
+                _log.debug(
+                    "XML parse failed for <scenario> tag; trying regex fallback. "
+                    "raw (truncated): %.120s",
+                    raw,
+                )
+                # id is optional — use `*` so an empty id="" still matches and
+                # falls through to the auto-generation logic below.
+                id_m = re.search(r'id=["\']([^"\']*)["\']', raw, re.IGNORECASE)
+                name_m = re.search(r'name=["\']([^"\']+)["\']', raw, re.IGNORECASE)
+                if not name_m:
+                    continue
+                text_m = re.search(
+                    r"<scenario[^>]*>(.*?)</scenario>", raw, re.DOTALL | re.IGNORECASE
+                )
+                scenario_id = id_m.group(1).strip() if id_m else ""
+                name = name_m.group(1).strip()
+                description = text_m.group(1).strip() if text_m else ""
+            else:
+                scenario_id = (elem.get("id") or "").strip()
+                name = (elem.get("name") or "").strip()
+                description = (elem.text or "").strip()
+
             if not name:
                 continue
 
@@ -137,6 +184,12 @@ class KnowledgeExtractor:
                         name=name,
                         description=description,
                     )
+                )
+                _log.debug(
+                    "Extracted new scenario via XML: id=%s name=%s (session=%s)",
+                    auto_id,
+                    name,
+                    ctx.session_id,
                 )
 
     def _extract_clarifications(self, text: str, ctx: AgentContext) -> None:
@@ -178,6 +231,111 @@ class KnowledgeExtractor:
             ctx.clarification_queue.append(
                 ClarificationQuestion(id=auto_id, question=question)
             )
+
+    def merge_project_info_from_json(self, json_text: str, ctx: AgentContext) -> bool:
+        """Parse a JSON object with project_name/domain_description and merge into *ctx*.
+
+        This method is called after the dedicated project-info extraction AI call
+        in Phase 1 (ICEBREAK) to reconcile any project information that was
+        discussed but not captured via ``<project_info>`` XML tags.
+
+        Only fills fields that are still empty in the context — consistent with
+        the behaviour of ``_extract_project_info()``.
+
+        Returns True if at least one field was updated, False otherwise.
+        """
+        import json as _json
+
+        start = json_text.find("{")
+        end = json_text.rfind("}")
+        if start == -1 or end == -1 or end < start:
+            return False
+
+        try:
+            data = _json.loads(json_text[start : end + 1])
+        except (_json.JSONDecodeError, ValueError):
+            return False
+
+        if not isinstance(data, dict):
+            return False
+
+        updated = False
+        project_name = (data.get("project_name") or "").strip()
+        domain_description = (data.get("domain_description") or "").strip()
+
+        if project_name and not ctx.domain_knowledge.project_name:
+            ctx.domain_knowledge.project_name = project_name
+            updated = True
+        if domain_description and not ctx.domain_knowledge.domain_description:
+            ctx.domain_knowledge.domain_description = domain_description
+            updated = True
+
+        return updated
+
+    def merge_concepts_from_json(self, json_text: str, ctx: AgentContext) -> int:
+        """Parse a JSON array of domain concepts and merge them into *ctx* in-place.
+
+        This method is called after the dedicated concept-extraction AI call in
+        Phase 3 (both on initial entry and after each conversation turn) to
+        reconcile any concepts that were discussed but not captured via
+        ``<concept>`` XML tags.
+
+        Returns the number of new concepts added to the context.
+        """
+        import json as _json
+
+        start = json_text.find("[")
+        end = json_text.rfind("]")
+        if start == -1 or end == -1 or end < start:
+            return 0
+
+        try:
+            concepts_data = _json.loads(json_text[start : end + 1])
+        except (_json.JSONDecodeError, ValueError):
+            return 0
+
+        if not isinstance(concepts_data, list):
+            return 0
+
+        added = 0
+        for item in concepts_data:
+            if not isinstance(item, dict):
+                continue
+            name = (item.get("name") or "").strip()
+            if not name:
+                continue
+            type_str = (item.get("type") or "ENTITY").upper()
+            description = (item.get("description") or "").strip()
+            confidence_raw = item.get("confidence")
+            try:
+                confidence = float(confidence_raw) if confidence_raw is not None else 0.8
+            except (ValueError, TypeError):
+                confidence = 0.8
+            try:
+                concept_type = ConceptType(type_str)
+            except ValueError:
+                concept_type = ConceptType.ENTITY
+
+            existing = next(
+                (c for c in ctx.domain_knowledge.domain_concepts if c.name == name),
+                None,
+            )
+            if existing:
+                existing.confidence = max(existing.confidence, confidence)
+                if description and not existing.description:
+                    existing.description = description
+            else:
+                ctx.domain_knowledge.domain_concepts.append(
+                    DomainConcept(
+                        name=name,
+                        concept_type=concept_type,
+                        description=description,
+                        confidence=confidence,
+                    )
+                )
+                added += 1
+
+        return added
 
     def merge_scenarios_from_json(self, json_text: str, ctx: AgentContext) -> int:
         """Parse a JSON array of scenarios and merge them into *ctx* in-place.
