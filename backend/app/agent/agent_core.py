@@ -996,8 +996,7 @@ class AgentCore:
                 concepts_str = "、".join(item.concepts)
                 alternatives_str = " / ".join(item.alternatives) if item.alternatives else "—"
                 lines.append(
-                    f"| {item.index} | {item.context_name} | {concepts_str} "
-                    f"| {item.rationale} | {alternatives_str} |"
+                    f"| {item.index} | {item.context_name} | {concepts_str} | {item.rationale} | {alternatives_str} |"
                 )
             lines.append("")
 
@@ -1023,8 +1022,7 @@ class AgentCore:
             lines.append("|------|---------|---------|---------|---------|")
             for item in suggestion.review_items:
                 lines.append(
-                    f"| {item.index} | {item.severity} | {item.issue_type} "
-                    f"| {item.description} | {item.suggestion} |"
+                    f"| {item.index} | {item.severity} | {item.issue_type} | {item.description} | {item.suggestion} |"
                 )
             lines.append("")
 
